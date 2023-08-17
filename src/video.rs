@@ -36,9 +36,7 @@ pub struct Video {
 
 impl Video {
 	/// Creates a new [`Video`] from a path and calls `load()` on it's first frame
-	pub fn import(path: &str) -> Self {
-		// just use straight up Command's instead
-		
+	pub fn new(path: &str) -> Self {
 		let mut ffmpeg = FfmpegCommand::new()
 			.hide_banner()
 			.create_no_window()
@@ -49,20 +47,19 @@ impl Video {
 			.pix_fmt("rgba")
 			.output("-")
 			.spawn().unwrap();
-		// use .fps_mode() to sync all input files with video fps
-
-		// Use ffplay to play audio: https://github.com/nathanbabcock/ffmpeg-sidecar/blob/main/examples/ffplay_preview.rs
 
 		let mut iter = ffmpeg.iter().unwrap().filter_frames();
 
-		let new_frame = iter.next().unwrap();
+		let frame = iter.next().unwrap();
 
-		let next_frame = iter.next().unwrap();
+		let fps = {
+			let next_frame = iter.next().unwrap();
 
-		let fps = 1.0 / (new_frame.timestamp / next_frame.timestamp);
+			1.0 / (frame.timestamp / next_frame.timestamp)
+		};
 
 		let mut video = Self {
-			frame: Pixmap::from_vec(new_frame.data, IntSize::from_wh(new_frame.width, new_frame.height).unwrap()).unwrap(),
+			frame: Pixmap::from_vec(frame.data, IntSize::from_wh(frame.width, frame.height).unwrap()).unwrap(),
 			path: String::from(path),
 			timestamp: 0,
 			fps,
@@ -71,8 +68,8 @@ impl Video {
 			y: 0.0,
 			sx: 1.0,
 			sy: 1.0,
-			width: new_frame.width,
-			height: new_frame.height,
+			width: frame.width,
+			height: frame.height,
 			scaled: false,
 			drag: Drag::None,
 			ffmpeg,
@@ -92,7 +89,15 @@ impl Video {
 	pub fn load(&mut self, timestamp: u32) {
 		match timestamp.cmp(&self.timestamp) {
 			Ordering::Greater => {
-				if let Some(new_frame) = self.iter.nth((timestamp - self.timestamp) as usize) {
+				let diff = timestamp - self.timestamp;
+
+				let new_frame = if diff == 1 {
+					self.iter.next()
+				} else {
+					self.iter.nth(diff as usize)
+				};
+
+				if let Some(new_frame) = new_frame {
 					self.frame = Pixmap::from_vec(new_frame.data, IntSize::from_wh(new_frame.width, new_frame.height).unwrap()).unwrap();
 				} else {
 					self.frame = Pixmap::new(1, 1).unwrap();
@@ -135,7 +140,7 @@ impl Video {
 	///
 	/// This also applies changes from the `width` and `height` fields
 	fn reload(&mut self) {
-		let _ = self.ffmpeg.quit();
+		let _ = self.ffmpeg.quit(); // Probably not good but .unwrap() sometimes panics
 
 		self.ffmpeg = FfmpegCommand::new()
 			.hide_banner()
