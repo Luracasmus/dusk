@@ -32,19 +32,22 @@
 	clippy::multiple_crate_versions,
 	clippy::cast_precision_loss,
 	clippy::cast_possible_truncation,
-	clippy::too_many_lines,
-	clippy::cast_sign_loss
+	clippy::cast_sign_loss,
+	clippy::cognitive_complexity,
+	clippy::too_many_lines
 )]
 
 mod video;
 
-use std::num::NonZeroU32;
+use std::{num::NonZeroU32, time::Instant};
 
+use emath::lerp;
 use ffmpeg_sidecar::download::auto_download;
 use softbuffer::{Context, Surface};
-use tiny_skia::{Pixmap, Color, PixmapPaint, BlendMode, Transform, PathBuilder, Rect, Stroke, LineJoin, Paint, Shader};
+use rayon::prelude::*;
+use tiny_skia::{BYTES_PER_PIXEL, Pixmap, Color, PixmapPaint, BlendMode, Transform, PathBuilder, Rect, Stroke, LineJoin, Paint, Shader};
 use video::{Video, Drag};
-use winit::{event_loop::EventLoop, window::{WindowBuilder, Icon, Theme, CursorIcon, Fullscreen}, dpi::{LogicalSize, PhysicalPosition}, event::{Event, WindowEvent, KeyEvent, ElementState, MouseScrollDelta}, keyboard::Key};
+use winit::{event_loop::{EventLoop, DeviceEvents}, window::{WindowBuilder, Icon, Theme, CursorIcon, Fullscreen}, dpi::{LogicalSize, PhysicalPosition}, event::{Event, WindowEvent, KeyEvent, ElementState, MouseScrollDelta}, keyboard::Key};
 
 #[derive(PartialEq, Eq)]
 enum ClickState {
@@ -54,21 +57,40 @@ enum ClickState {
 }
 
 fn main() {
-	auto_download().unwrap();
+	auto_download().expect("FFmpeg could not be detected or downloaded automatically. Please install the latest FFmpeg manually");
 
 	let mut background = Color::from_rgba8(25, 25, 35, 255);
 
 	let event_loop = EventLoop::new().unwrap();
+	event_loop.listen_device_events(DeviceEvents::Never);
 
 	let window = {
-		let mut icon = Pixmap::new(1, 1).unwrap();
+		let mut icon = Pixmap::new(64, 64).unwrap();
 		icon.fill(background);
 
-		WindowBuilder::default()
+		icon.stroke_path(
+			&PathBuilder::from_circle(32.0, 32.0, 16.0).unwrap(),
+			&Paint {
+				shader: Shader::SolidColor(Color::from_rgba8(255, 134, 4, 255)),
+				blend_mode: BlendMode::Source,
+				..Paint::default()
+			},
+			&Stroke {
+				width: 8.0,
+				..Default::default()
+			},
+			Transform::identity(),
+			None
+		);
+
+		let w = icon.width();
+		let h = icon.height();
+
+		WindowBuilder::new()
 			.with_title("Dusk")
 			.with_inner_size(LogicalSize::new(2560, 1440))
 			.with_min_inner_size(LogicalSize::new(256, 144))
-			.with_window_icon(Some(Icon::from_rgba(icon.data().to_vec(), icon.width(), icon.height()).unwrap()))
+			.with_window_icon(Some(Icon::from_rgba(icon.take(), w, h).unwrap()))
 			.build(&event_loop)
 			.unwrap()
 	};
@@ -86,13 +108,9 @@ fn main() {
 		unsafe { Surface::new(&context, &window) }.unwrap()
 	};
 
-	let mut videos = vec![
-		Video::new("input/30.mp4"),
-		Video::new("input/30t.gif"),
-		Video::new("input/sample-1.avi")
-	];
+	let mut videos: Vec<Video> = Vec::with_capacity(1);
 
-	let mut playhead = 0;
+	let mut playhead = 0.0;
 	let mut playing = false;
 
 	let mut mouse_pos = PhysicalPosition::new(0.0, 0.0);
@@ -101,9 +119,7 @@ fn main() {
 	let mut scroll = 0.0_f32;
 
 	let mut gui = true;
-
-	// ADD DELTATIME TO TIMELINE EVERY FRAME SO THAT PREVIEW DOESNT HAVE A SPECIFIC FPS AND MAKE IT SO THAT VIDEO LOAD GIVES THE CLOSEST FRAME TO THE CURRENT TIMESTAMP
-	let mut timeline: f32 = 1.0;
+	let mut timeline = 0.0_f32;
 
 	let mut pixmap = {
 		let size = window.inner_size();
@@ -111,25 +127,72 @@ fn main() {
 		Pixmap::new(size.width, size.height).unwrap()
 	};
 
+	let now = Instant::now();
+	let mut last_elapsed = now.elapsed().as_secs_f32();
+
+	let mut delta = 0.0;
+	let mut avg = 0.0_f32;
+
 	event_loop.run(move |event, _, control_flow| { match event {
 		//Event::Resumed => {},
 		Event::RedrawRequested(_) => {
-			pixmap.fill(background);
+			let new_elapsed = now.elapsed().as_secs_f32();
+			delta = new_elapsed - last_elapsed;
+			last_elapsed = new_elapsed;
+			let fps = delta.recip();
+			avg = avg.mul_add(29.0, fps) / 30.0;
+			println!("{avg}");
 
-			for video in &mut videos {
-				video.load(playhead - video.start);
+			if playing { playhead += delta; }
 
-				pixmap.draw_pixmap(
-					(video.x) as i32,
-					(video.y) as i32,
-					video.frame.as_ref(),
-					&PixmapPaint {
-						blend_mode: BlendMode::Source,
-						..Default::default()
-					},
-					Transform::from_scale(video.sx, video.sy),
-					None
-				);
+			let mut fill = true;
+			let mut occlusion = vec![true; videos.len()];
+
+			for ((i, video), visible) in videos.iter().enumerate().zip(occlusion.iter_mut()) {
+				let x = video.x;
+				let y = video.y;
+				let w = video.frame.width() as f32;
+				let h = video.frame.height() as f32;
+
+				for other in &videos[(i + 1)..] {
+					if
+						other.x <= x && // left
+						other.x + other.frame.width() as f32 >= x + w && // right
+						other.y <= y && // top
+						other.y + other.frame.height() as f32 >= x + h // bottom
+					{
+						*visible = false;
+					}
+				}
+
+				if
+					x <= 0.0 &&
+					x + w >= pixmap.width() as f32 &&
+					y <= 0.0 &&
+					y + h >= pixmap.height() as f32
+				{
+					fill = false;
+				}
+			}
+
+			if fill { pixmap.fill(background); }
+
+			for (video, visible) in videos.iter_mut().zip(occlusion.into_iter()) {
+				if visible {
+					video.load(playhead);
+
+					pixmap.draw_pixmap(
+						(video.x) as i32,
+						(video.y) as i32,
+						video.frame.as_ref(),
+						&PixmapPaint {
+							blend_mode: BlendMode::Source,
+							..Default::default()
+						},
+						Transform::from_scale(video.sx, video.sy),
+						None
+					);
+				}
 			}
 
 			let pix_w = pixmap.width() as f32;
@@ -140,7 +203,7 @@ fn main() {
 				let h = pix_h.mul_add(0.05, 1.0);
 
 				Rect::from_xywh(
-					pix_w.mul_add(0.5, -w * 0.5),
+					pix_w.mul_add(0.5, w * -0.5),
 					pix_h.mul_add(-0.01, pix_h - h),
 					w,
 					h
@@ -159,7 +222,7 @@ fn main() {
 
 			if let Some(rect) = rect {
 				let stroke = Stroke {
-					width: pix_w.min(pix_h) * 0.01,
+					width: pix_w.min(pix_h) * 0.0075,
 					line_join: LineJoin::Round,
 					..Default::default()
 				};
@@ -170,34 +233,32 @@ fn main() {
 					&path,
 					&Paint { shader: Shader::SolidColor(Color::from_rgba8(173, 216, 230, 200)), ..Paint::default() },
 					&stroke,
-					Transform::default(),
+					Transform::identity(),
 					None
 				);
 			}
 
 			let mut buffer = surface.buffer_mut().unwrap();
 
-			for (buf, pix) in buffer.iter_mut().zip(pixmap.data().chunks_exact(4)) {
+			/*for (buf, pix) in buffer.iter_mut().zip(pixmap.data().chunks_exact(4)) {
 				*buf = u32::from_le_bytes([pix[2], pix[1], pix[0], 0]);
-			}
+			}*/
+
+			buffer.par_iter_mut().zip(pixmap.data().par_chunks_exact(BYTES_PER_PIXEL)).for_each(|(buf, pix)| {
+				*buf = u32::from_le_bytes([pix[2], pix[1], pix[0], 0]);
+			});
 
 			window.pre_present_notify();
 			//buffer.present_with_damage(&[softbuffer::Rect { x: 0, y: 0, width: NonZeroU32::new(1).unwrap(), height: NonZeroU32::new(1).unwrap() }]).unwrap();
 			buffer.present().unwrap();
 		},
 		Event::AboutToWait => {
-			if playing {
-				playhead += 1;
-			}
-
 			for video in videos.iter_mut().rev() {
 				if mouse_state == ClickState::None {
 					video.drag = Drag::None;
 				} else if mouse_state == ClickState::Press {
 					let half_width = 0.5 * video.frame.width() as f32;
 					let half_height = 0.5 * video.frame.height() as f32;
-
-					// TODO: SOMETHING IS WRONG HERE WITH THE SCALE
 
 					if (video.x + half_width - mouse_pos.x).abs() < half_width && (video.y + half_height - mouse_pos.y).abs() < half_height {
 						window.set_cursor_icon(CursorIcon::Move);
@@ -211,7 +272,7 @@ fn main() {
 
 					mouse_diff = PhysicalPosition::new(0.0, 0.0);
 
-					if scroll.abs() > 0.01 {
+					if scroll.abs() > 0.001 {
 						video.sx = video.sx.mul_add(scroll, video.sx);
 						video.sy = video.sy.mul_add(scroll, video.sy);
 
@@ -219,7 +280,7 @@ fn main() {
 					}
 				}
 
-				if video.scaled && scroll.abs() < 0.01 {
+				if video.scaled && scroll.abs() < 0.001 {
 					video.resize();
 
 					video.scaled = false;
@@ -230,12 +291,12 @@ fn main() {
 				mouse_state = ClickState::Hold;
 			}
 
-			scroll *= 0.9;
+			scroll = lerp(scroll..=0.0, (delta * 5.0).min(1.0));
 
 			if gui {
-				timeline = (timeline + 0.05).min(1.0);
+				timeline = lerp(timeline..=1.0, (delta * 5.0).min(1.0));
 			} else {
-				timeline *= 0.9;
+				timeline = lerp(timeline..=0.0, (delta * 5.0).min(1.0));
 			}
 
 			let visible = window.is_visible().map_or(true, |visible| visible);
@@ -246,6 +307,10 @@ fn main() {
 			}
 		},
 		Event::WindowEvent { event, .. } => match event {
+			WindowEvent::DroppedFile(path) => {
+				videos.push(Video::new(path));
+				// set video start to current playhead
+			},
 			WindowEvent::ThemeChanged(theme) => background = match theme {
 				Theme::Dark => Color::from_rgba8(25, 25, 35, 255),
 				Theme::Light => Color::from_rgba8(225, 225, 235, 255)
@@ -269,8 +334,8 @@ fn main() {
 				),
 				Key::Space => playing = !playing,
 				Key::Tab => gui = !gui,
-				Key::ArrowLeft => playhead = playhead.saturating_sub(1),
-				Key::ArrowRight => playhead += 1,
+				Key::ArrowLeft => playhead = (playhead - 5.0).max(0.0),
+				Key::ArrowRight => playhead += 1.0,
 				_ => ()
 			},
 			WindowEvent::MouseInput { state, .. } => mouse_state = match state {
@@ -299,6 +364,11 @@ fn main() {
 				pixmap = Pixmap::new(size.width, size.height).unwrap();
 			},
 			_ => ()
+		},
+		Event::LoopExiting => {
+			for video in &mut videos {
+				let _ = video.ffmpeg.quit();
+			}
 		},
 		_ => ()
 	}}).unwrap();
