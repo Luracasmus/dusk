@@ -3,8 +3,9 @@ name = "dusk"
 version = "0.1.0"
 authors = ["Luracasmus"]
 edition = "2021"
-rust-version = "1.71.1"
+rust-version = "1.72.0"
 description = "Small, intuitive video editor in Rust using FFmpeg"
+repository = "https://github.com/Luracasmus/dusk"
 keywords = ["ffmpeg", "video", "editor"]
 categories = [
 	"rendering",
@@ -18,7 +19,9 @@ categories = [
 build = "build.rs"
 
 [dependencies]
+emath = "0.22.0"
 ffmpeg-sidecar = "0.4.1"
+rayon = "1.7.0"
 tiny-skia = { version = "0.11.1", default-features = false, features = ["std", "simd"] } # Disable png-format
 
 # https://github.com/servo/surfman
@@ -39,7 +42,6 @@ winit = "0.29.1-beta"
 [profile.release]
 lto = "thin"
 strip = "symbols"
-panic = "abort"
 codegen-units = 1
 
 [profile.release.package."*"]
