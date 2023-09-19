@@ -3,8 +3,8 @@ name = "dusk"
 version = "0.1.0"
 authors = ["Luracasmus"]
 edition = "2021"
-rust-version = "1.72.0"
-description = "Small, intuitive video editor in Rust using FFmpeg"
+rust-version = "1.72.1"
+description = "A small, intuitive video editor in Rust"
 repository = "https://github.com/Luracasmus/dusk"
 keywords = ["ffmpeg", "video", "editor"]
 categories = [
@@ -22,21 +22,19 @@ build = "build.rs"
 emath = "0.22.0"
 ffmpeg-sidecar = "0.4.1"
 rayon = "1.7.0"
+rfd = "0.12.0"
 tiny-skia = { version = "0.11.1", default-features = false, features = ["std", "simd"] } # Disable png-format
-
-# https://github.com/servo/surfman
-# https://docs.rs/gstreamer/latest/gstreamer/
 
 [build-dependencies]
 embed-manifest = "1.4.0"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-softbuffer = { version = "0.3.0", default-features = false }
+softbuffer = { version = "0.3.1", default-features = false }
 winit = { version = "0.29.1-beta", default-features = false }
 # Default features are for Linux only
 
 [target.'cfg(target_os = "linux")'.dependencies]
-softbuffer = "0.3.0"
+softbuffer = "0.3.1"
 winit = "0.29.1-beta"
 
 [profile.release]
