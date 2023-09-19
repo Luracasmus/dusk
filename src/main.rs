@@ -34,18 +34,20 @@
 	clippy::cast_possible_truncation,
 	clippy::cast_sign_loss,
 	clippy::cognitive_complexity,
-	clippy::too_many_lines
+	clippy::too_many_lines,
+	clippy::cast_lossless
 )]
 
 mod video;
 
-use std::{num::NonZeroU32, time::Instant};
+use std::{num::NonZeroU32, time::Instant, env::current_dir};
 
 use emath::lerp;
 use ffmpeg_sidecar::download::auto_download;
-use softbuffer::{Context, Surface};
 use rayon::prelude::*;
-use tiny_skia::{BYTES_PER_PIXEL, Pixmap, Color, PixmapPaint, BlendMode, Transform, PathBuilder, Rect, Stroke, LineJoin, Paint, Shader};
+use rfd::FileDialog;
+use softbuffer::{Context, Surface};
+use tiny_skia::{BYTES_PER_PIXEL, Pixmap, Color, PixmapPaint, BlendMode, Transform, PathBuilder, Rect, Stroke, LineJoin, Paint, Shader, FillRule, NonZeroRect, Path, PixmapMut};
 use video::{Video, Drag};
 use winit::{event_loop::{EventLoop, DeviceEvents}, window::{WindowBuilder, Icon, Theme, CursorIcon, Fullscreen}, dpi::{LogicalSize, PhysicalPosition}, event::{Event, WindowEvent, KeyEvent, ElementState, MouseScrollDelta}, keyboard::Key};
 
@@ -65,18 +67,18 @@ fn main() {
 	event_loop.listen_device_events(DeviceEvents::Never);
 
 	let window = {
-		let mut icon = Pixmap::new(64, 64).unwrap();
+		let mut icon = Pixmap::new(32, 32).unwrap();
 		icon.fill(background);
 
 		icon.stroke_path(
-			&PathBuilder::from_circle(32.0, 32.0, 16.0).unwrap(),
+			&PathBuilder::from_circle(16.0, 16.0, 8.0).unwrap(),
 			&Paint {
 				shader: Shader::SolidColor(Color::from_rgba8(255, 134, 4, 255)),
 				blend_mode: BlendMode::Source,
 				..Paint::default()
 			},
 			&Stroke {
-				width: 8.0,
+				width: 4.0,
 				..Default::default()
 			},
 			Transform::identity(),
@@ -95,12 +97,14 @@ fn main() {
 			.unwrap()
 	};
 
-	if let Some(theme) = window.theme() {
+	window.theme().map_or_else(|| {
+		window.set_theme(Some(Theme::Dark));
+	}, |theme| {
 		background = match theme {
 			Theme::Dark => Color::from_rgba8(25, 25, 35, 255),
 			Theme::Light => Color::from_rgba8(225, 225, 235, 255)
 		};
-	}
+	});
 
 	let mut surface = {
 		let context = unsafe { Context::new(&window) }.unwrap();
@@ -108,7 +112,7 @@ fn main() {
 		unsafe { Surface::new(&context, &window) }.unwrap()
 	};
 
-	let mut videos: Vec<Video> = Vec::with_capacity(1);
+	let mut videos: Vec<Video> = vec![];
 
 	let mut playhead = 0.0;
 	let mut playing = false;
@@ -134,7 +138,7 @@ fn main() {
 	let mut avg = 0.0_f32;
 
 	event_loop.run(move |event, _, control_flow| { match event {
-		//Event::Resumed => {},
+		//Event::Resumed => control_flow.set_wait(),
 		Event::RedrawRequested(_) => {
 			let new_elapsed = now.elapsed().as_secs_f32();
 			delta = new_elapsed - last_elapsed;
@@ -177,79 +181,101 @@ fn main() {
 
 			if fill { pixmap.fill(background); }
 
-			for (video, visible) in videos.iter_mut().zip(occlusion.into_iter()) {
-				if visible {
-					video.load(playhead);
+			for (video, visible) in videos.iter_mut().zip(occlusion.into_iter()) { if visible {
+				video.load(playhead);
 
-					pixmap.draw_pixmap(
-						(video.x) as i32,
-						(video.y) as i32,
-						video.frame.as_ref(),
-						&PixmapPaint {
-							blend_mode: BlendMode::Source,
-							..Default::default()
+				pixmap.draw_pixmap(
+					(video.x) as i32,
+					(video.y) as i32,
+					video.frame.as_ref(),
+					&PixmapPaint {
+						blend_mode: BlendMode::Source,
+						..Default::default()
+					},
+					if let Some((sx, sy)) = video.scale {
+						NonZeroRect::from_xywh(
+							video.x * (1.0 - sx),
+							video.y * (1.0 - sy),
+							sx,
+							sy
+						).map_or_else(Transform::identity, Transform::from_bbox)
+					} else {
+						Transform::identity()
+					},
+					None
+				);
+			}}
+
+			if timeline > 0.001 {
+				let scr_w = pixmap.width() as f32;
+				let scr_h = pixmap.height() as f32;
+
+				let rect = {
+					let w = scr_w * (timeline - 0.5).max(0.0).mul_add(1.5, 0.05);
+					let h = scr_h * timeline.min(0.5) * 0.25;
+	
+					Rect::from_xywh(
+						scr_w.mul_add(0.5, w * -0.5),
+						scr_h.mul_add(-0.01, scr_h - h),
+						w,
+						h
+					)
+				};
+	
+				if let Some(rect) = rect {
+					fn stroke_fill_path(
+						mut pixmap: PixmapMut,
+						path: &Path,
+						stroke_paint: &Paint,
+						fill_paint: &Paint,
+						stroke: &Stroke
+					) {
+						pixmap.stroke_path(
+							path,
+							stroke_paint,
+							stroke,
+							Transform::identity(),
+							None
+						);
+	
+						pixmap.fill_path(
+							path,
+							fill_paint,
+							FillRule::default(),
+							Transform::identity(),
+							None
+						);
+					}
+
+					let alpha = (2000.0 * timeline.min(0.1)).round() as u8;
+
+					stroke_fill_path(
+						pixmap.as_mut(),
+						&PathBuilder::from_rect(rect),
+						&Paint {
+							shader: Shader::SolidColor(Color::from_rgba8(173, 216, 230, alpha)),
+							..Paint::default()
 						},
-						Transform::from_scale(video.sx, video.sy),
-						None
+						&Paint {
+							shader: Shader::SolidColor(Color::from_rgba8(35, 35, 55, alpha)),
+							..Paint::default()
+						},
+						&Stroke {
+							width: scr_w.min(scr_h) * 0.0075,
+							line_join: LineJoin::Round,
+							..Default::default()
+						}
 					);
 				}
 			}
 
-			let pix_w = pixmap.width() as f32;
-			let pix_h = pixmap.height() as f32;
-
-			let rect = if timeline > 0.5 {
-				let w = (pix_w * 0.1).mul_add((timeline - 0.5).max(0.0).mul_add(6.0, timeline), 1.0);
-				let h = pix_h.mul_add(0.05, 1.0);
-
-				Rect::from_xywh(
-					pix_w.mul_add(0.5, w * -0.5),
-					pix_h.mul_add(-0.01, pix_h - h),
-					w,
-					h
-				)
-			} else {
-				let w = pix_w.mul_add(0.05, 1.0);
-				let h = (timeline * pix_h).mul_add(0.1, 1.0);
-
-				Rect::from_xywh(
-					pix_w.mul_add(0.5, -w * 0.5),
-					pix_h.mul_add(-0.01, pix_h - h),
-					w,
-					h
-				)
-			};
-
-			if let Some(rect) = rect {
-				let stroke = Stroke {
-					width: pix_w.min(pix_h) * 0.0075,
-					line_join: LineJoin::Round,
-					..Default::default()
-				};
-
-				let path = PathBuilder::from_rect(rect);
-
-				pixmap.stroke_path(
-					&path,
-					&Paint { shader: Shader::SolidColor(Color::from_rgba8(173, 216, 230, 200)), ..Paint::default() },
-					&stroke,
-					Transform::identity(),
-					None
-				);
-			}
-
 			let mut buffer = surface.buffer_mut().unwrap();
-
-			/*for (buf, pix) in buffer.iter_mut().zip(pixmap.data().chunks_exact(4)) {
-				*buf = u32::from_le_bytes([pix[2], pix[1], pix[0], 0]);
-			}*/
 
 			buffer.par_iter_mut().zip(pixmap.data().par_chunks_exact(BYTES_PER_PIXEL)).for_each(|(buf, pix)| {
 				*buf = u32::from_le_bytes([pix[2], pix[1], pix[0], 0]);
 			});
 
 			window.pre_present_notify();
-			//buffer.present_with_damage(&[softbuffer::Rect { x: 0, y: 0, width: NonZeroU32::new(1).unwrap(), height: NonZeroU32::new(1).unwrap() }]).unwrap();
 			buffer.present().unwrap();
 		},
 		Event::AboutToWait => {
@@ -273,17 +299,17 @@ fn main() {
 					mouse_diff = PhysicalPosition::new(0.0, 0.0);
 
 					if scroll.abs() > 0.001 {
-						video.sx = video.sx.mul_add(scroll, video.sx);
-						video.sy = video.sy.mul_add(scroll, video.sy);
+						let (mut sx, mut sy) = video.scale.unwrap_or((1.0, 1.0));
 
-						video.scaled = true;
+						sx = sx.mul_add(scroll, sx);
+						sy = sy.mul_add(scroll, sy);
+
+						video.scale = Some((sx, sy));
 					}
 				}
 
-				if video.scaled && scroll.abs() < 0.001 {
+				if video.scale.is_some() && scroll.abs() < 0.001 {
 					video.resize();
-
-					video.scaled = false;
 				}
 			}
 
@@ -302,13 +328,17 @@ fn main() {
 			let visible = window.is_visible().map_or(true, |visible| visible);
 			let minimized = window.is_minimized().map_or(false, |minimized| minimized);
 
+			//println!("scroll: {scroll}");
+			//println!("timeline: {timeline}");
+
+			// && (playing || scroll.abs() > 0.001 || (timeline > 0.001 && timeline < 0.999))
 			if visible && !minimized {
 				window.request_redraw();
 			}
 		},
 		Event::WindowEvent { event, .. } => match event {
-			WindowEvent::DroppedFile(path) => {
-				videos.push(Video::new(path));
+			WindowEvent::DroppedFile(path) => if let Some(video) = Video::new(path) {
+				videos.push(video);
 				// set video start to current playhead
 			},
 			WindowEvent::ThemeChanged(theme) => background = match theme {
@@ -327,15 +357,67 @@ fn main() {
 			} => match key {
 				Key::F11 => window.set_fullscreen(
 					if window.fullscreen().is_none() {
-						Some(Fullscreen::Borderless(window.current_monitor()))
+						Some(Fullscreen::Borderless(None))
 					} else {
 						None
 					}
 				),
+				Key::Delete => videos.retain_mut(|video| {
+					let keep = video.drag == Drag::None;
+
+					if !keep {
+						let _ = video.ffmpeg.quit();
+					}
+
+					keep
+				}),
 				Key::Space => playing = !playing,
 				Key::Tab => gui = !gui,
 				Key::ArrowLeft => playhead = (playhead - 5.0).max(0.0),
 				Key::ArrowRight => playhead += 1.0,
+				Key::Character(key) => match key.as_str() {
+					"i" => {
+						window.set_visible(false);
+
+						let path = current_dir().unwrap();
+
+						let res = FileDialog::new()
+							.add_filter("Video", &["webm", "mp4", "mov", "avi", "gif"])
+							.add_filter("Image", &["png", "jpg", "jpeg", "webp"])
+							.set_directory(path)
+							.set_title("Import")
+							.pick_files();
+
+						if let Some(files) = res {
+							for file in files {
+								if let Some(video) = Video::new(file) {
+									videos.push(video);
+								}
+							}
+						}
+
+						window.set_visible(true);
+					}
+					"e" => {
+						window.set_visible(false);
+
+						let path = current_dir().unwrap();
+
+						let res = FileDialog::new()
+							.set_file_name("dusk-export")
+							.set_directory(path)
+							.add_filter("Video", &["webm", "mp4", "mov", "avi", "gif"])
+							.set_title("Export")
+							.save_file();
+
+						if let Some(file) = res {
+							println!("{file:?}");
+						}
+
+						window.set_visible(true);
+					},
+					_ => ()
+				},
 				_ => ()
 			},
 			WindowEvent::MouseInput { state, .. } => mouse_state = match state {
@@ -365,10 +447,8 @@ fn main() {
 			},
 			_ => ()
 		},
-		Event::LoopExiting => {
-			for video in &mut videos {
-				let _ = video.ffmpeg.quit();
-			}
+		Event::LoopExiting => for video in &mut videos {
+			let _ = video.ffmpeg.quit();
 		},
 		_ => ()
 	}}).unwrap();
