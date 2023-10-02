@@ -58,6 +58,30 @@ enum ClickState {
 	None
 }
 
+fn stroke_fill_path(
+	mut pixmap: PixmapMut,
+	path: &Path,
+	stroke_paint: &Paint,
+	fill_paint: &Paint,
+	stroke: &Stroke
+) {
+	pixmap.stroke_path(
+		path,
+		stroke_paint,
+		stroke,
+		Transform::identity(),
+		None
+	);
+
+	pixmap.fill_path(
+		path,
+		fill_paint,
+		FillRule::default(),
+		Transform::identity(),
+		None
+	);
+}
+
 fn main() {
 	auto_download().expect("FFmpeg could not be detected or downloaded automatically. Please install the latest FFmpeg manually");
 
@@ -70,19 +94,22 @@ fn main() {
 		let mut icon = Pixmap::new(32, 32).unwrap();
 		icon.fill(background);
 
-		icon.stroke_path(
+		stroke_fill_path(
+			icon.as_mut(),
 			&PathBuilder::from_circle(16.0, 16.0, 8.0).unwrap(),
 			&Paint {
 				shader: Shader::SolidColor(Color::from_rgba8(255, 134, 4, 255)),
 				blend_mode: BlendMode::Source,
 				..Paint::default()
 			},
+			&Paint {
+				shader: Shader::SolidColor(Color::from_rgba8(35, 35, 55, 125)),
+				..Paint::default()
+			},
 			&Stroke {
 				width: 4.0,
 				..Default::default()
-			},
-			Transform::identity(),
-			None
+			}
 		);
 
 		let w = icon.width();
@@ -97,9 +124,9 @@ fn main() {
 			.unwrap()
 	};
 
-	window.theme().map_or_else(|| {
-		window.set_theme(Some(Theme::Dark));
-	}, |theme| {
+	window.theme().map_or_else(
+		|| window.set_theme(Some(Theme::Dark)),
+		|theme| {
 		background = match theme {
 			Theme::Dark => Color::from_rgba8(25, 25, 35, 255),
 			Theme::Light => Color::from_rgba8(225, 225, 235, 255)
@@ -150,24 +177,12 @@ fn main() {
 			if playing { playhead += delta; }
 
 			let mut fill = true;
-			let mut occlusion = vec![true; videos.len()];
 
-			for ((i, video), visible) in videos.iter().enumerate().zip(occlusion.iter_mut()) {
+			let occlusion: Vec<_> = videos.iter().enumerate().map(|(i, video)| {
 				let x = video.x;
 				let y = video.y;
 				let w = video.frame.width() as f32;
 				let h = video.frame.height() as f32;
-
-				for other in &videos[(i + 1)..] {
-					if
-						other.x <= x && // left
-						other.x + other.frame.width() as f32 >= x + w && // right
-						other.y <= y && // top
-						other.y + other.frame.height() as f32 >= x + h // bottom
-					{
-						*visible = false;
-					}
-				}
 
 				if
 					x <= 0.0 &&
@@ -177,11 +192,19 @@ fn main() {
 				{
 					fill = false;
 				}
-			}
+
+				videos[(i + 1)..].iter().any(|other| {
+					other.x <= x && // left
+					other.x + other.frame.width() as f32 >= x + w && // right
+					other.y <= y && // top
+					other.y + other.frame.height() as f32 >= y + h // bottom
+					//other.y + other.frame.height() as f32 >= x + h // idk why it was x + h
+				})
+			}).collect();
 
 			if fill { pixmap.fill(background); }
 
-			for (video, visible) in videos.iter_mut().zip(occlusion.into_iter()) { if visible {
+			for (video, occluded) in videos.iter_mut().zip(occlusion.into_iter()) { if !occluded {
 				video.load(playhead);
 
 				pixmap.draw_pixmap(
@@ -210,62 +233,78 @@ fn main() {
 				let scr_w = pixmap.width() as f32;
 				let scr_h = pixmap.height() as f32;
 
-				let rect = {
+				let menu = {
 					let w = scr_w * (timeline - 0.5).max(0.0).mul_add(1.5, 0.05);
-					let h = scr_h * timeline.min(0.5) * 0.25;
+					let h = scr_h * timeline.min(0.5) * 0.15;
 	
 					Rect::from_xywh(
 						scr_w.mul_add(0.5, w * -0.5),
-						scr_h.mul_add(-0.01, scr_h - h),
+						scr_h.mul_add(-0.015 * timeline, scr_h - h),
 						w,
 						h
 					)
 				};
 	
-				if let Some(rect) = rect {
-					fn stroke_fill_path(
-						mut pixmap: PixmapMut,
-						path: &Path,
-						stroke_paint: &Paint,
-						fill_paint: &Paint,
-						stroke: &Stroke
-					) {
-						pixmap.stroke_path(
-							path,
-							stroke_paint,
-							stroke,
-							Transform::identity(),
-							None
-						);
-	
-						pixmap.fill_path(
-							path,
-							fill_paint,
-							FillRule::default(),
-							Transform::identity(),
-							None
-						);
-					}
+				if let Some(menu) = menu {
+					let alpha = 10.0 * timeline.min(0.1);
 
-					let alpha = (2000.0 * timeline.min(0.1)).round() as u8;
+					let line = scr_w.min(scr_h) * 0.0025;
 
 					stroke_fill_path(
 						pixmap.as_mut(),
-						&PathBuilder::from_rect(rect),
+						&PathBuilder::from_rect(menu),
 						&Paint {
-							shader: Shader::SolidColor(Color::from_rgba8(173, 216, 230, alpha)),
+							shader: Shader::SolidColor(Color::from_rgba8(173, 216, 230, (alpha * 200.0) as u8)),
 							..Paint::default()
 						},
 						&Paint {
-							shader: Shader::SolidColor(Color::from_rgba8(35, 35, 55, alpha)),
+							shader: Shader::SolidColor(Color::from_rgba8(55, 55, 85, (alpha * 125.0) as u8)),
 							..Paint::default()
 						},
 						&Stroke {
-							width: scr_w.min(scr_h) * 0.0075,
+							width: line,
 							line_join: LineJoin::Round,
 							..Default::default()
 						}
 					);
+
+					let zoom = 10.0;
+
+					for (i, video) in videos.iter().enumerate() {
+						let preview = {
+							let l = menu.left() + line;
+							let t = (i as f32).mul_add(-5.0, menu.top() + line);
+							let r = menu.right() - line;
+							let b = (i as f32).mul_add(-5.0, menu.bottom() - line);
+
+							Rect::from_ltrb(
+								(l + video.duration.start() * zoom).min(r),
+								t,
+								(l + video.duration.end() * zoom).min(r),
+								b
+							)
+						};
+
+						if let Some(preview) = preview {
+							stroke_fill_path(
+								pixmap.as_mut(),
+								&PathBuilder::from_rect(preview),
+								&Paint {
+									shader: Shader::SolidColor(Color::from_rgba8(173, 216, 230, (alpha * 175.0) as u8)),
+									..Paint::default()
+								},
+								&Paint {
+									shader: Shader::SolidColor(Color::from_rgba8(35, 35, 55, (alpha * 100.0) as u8)),
+									..Paint::default()
+								},
+								&Stroke {
+									width: line * 0.5,
+									line_join: LineJoin::Round,
+									..Default::default()
+								}
+							);
+						}
+					}
 				}
 			}
 
@@ -337,15 +376,23 @@ fn main() {
 			}
 		},
 		Event::WindowEvent { event, .. } => match event {
-			WindowEvent::DroppedFile(path) => if let Some(video) = Video::new(path) {
-				videos.push(video);
-				// set video start to current playhead
+			WindowEvent::MouseInput { state, .. } => mouse_state = match state {
+				ElementState::Pressed => ClickState::Press,
+				ElementState::Released => {
+					window.set_cursor_icon(CursorIcon::default());
+					ClickState::None
+				}
 			},
-			WindowEvent::ThemeChanged(theme) => background = match theme {
-				Theme::Dark => Color::from_rgba8(25, 25, 35, 255),
-				Theme::Light => Color::from_rgba8(225, 225, 235, 255)
+			WindowEvent::CursorMoved { position, .. } => {
+				if mouse_state == ClickState::Hold {
+					mouse_diff.x += position.x as f32 - mouse_pos.x;
+					mouse_diff.y += position.y as f32 - mouse_pos.y;
+				}
+
+				mouse_pos.x = position.x as f32;
+				mouse_pos.y = position.y as f32;
 			},
-			WindowEvent::CloseRequested => control_flow.set_exit(),
+			WindowEvent::MouseWheel { delta: MouseScrollDelta::LineDelta(_, y), .. } => scroll -= y * 0.0125,
 			WindowEvent::KeyboardInput {
 				event: KeyEvent {
 					logical_key: key,
@@ -355,6 +402,12 @@ fn main() {
 				},
 				..
 			} => match key {
+				Key::Space => playing = !playing,
+				Key::Tab => gui = !gui,
+				Key::ArrowLeft => playhead = (playhead - 5.0).max(0.0),
+				Key::ArrowRight => playhead += 1.0,
+				Key::ArrowUp => scroll -= 0.01,
+				Key::ArrowDown => scroll += 0.01,
 				Key::F11 => window.set_fullscreen(
 					if window.fullscreen().is_none() {
 						Some(Fullscreen::Borderless(None))
@@ -371,10 +424,6 @@ fn main() {
 
 					keep
 				}),
-				Key::Space => playing = !playing,
-				Key::Tab => gui = !gui,
-				Key::ArrowLeft => playhead = (playhead - 5.0).max(0.0),
-				Key::ArrowRight => playhead += 1.0,
 				Key::Character(key) => match key.as_str() {
 					"i" => {
 						window.set_visible(false);
@@ -390,7 +439,7 @@ fn main() {
 
 						if let Some(files) = res {
 							for file in files {
-								if let Some(video) = Video::new(file) {
+								if let Some(video) = Video::new(file, playhead) {
 									videos.push(video);
 								}
 							}
@@ -420,23 +469,6 @@ fn main() {
 				},
 				_ => ()
 			},
-			WindowEvent::MouseInput { state, .. } => mouse_state = match state {
-				ElementState::Pressed => ClickState::Press,
-				ElementState::Released => {
-					window.set_cursor_icon(CursorIcon::default());
-					ClickState::None
-				}
-			},
-			WindowEvent::CursorMoved { position, .. } => {
-				if mouse_state == ClickState::Hold {
-					mouse_diff.x += position.x as f32 - mouse_pos.x;
-					mouse_diff.y += position.y as f32 - mouse_pos.y;
-				}
-
-				mouse_pos.x = position.x as f32;
-				mouse_pos.y = position.y as f32;
-			},
-			WindowEvent::MouseWheel { delta: MouseScrollDelta::LineDelta(_, y), .. } => scroll -= y * 0.0125,
 			WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
 				surface.resize(
 					NonZeroU32::new(size.width).unwrap(),
@@ -445,6 +477,15 @@ fn main() {
 
 				pixmap = Pixmap::new(size.width, size.height).unwrap();
 			},
+			WindowEvent::DroppedFile(path) => if let Some(video) = Video::new(path, playhead) {
+				videos.push(video);
+				// set video start to current playhead
+			},
+			WindowEvent::ThemeChanged(theme) => background = match theme {
+				Theme::Dark => Color::from_rgba8(25, 25, 35, 255),
+				Theme::Light => Color::from_rgba8(225, 225, 235, 255)
+			},
+			WindowEvent::CloseRequested => control_flow.set_exit(),
 			_ => ()
 		},
 		Event::LoopExiting => for video in &mut videos {
