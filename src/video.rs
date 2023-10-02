@@ -34,7 +34,7 @@ pub struct Video {
 
 impl Video {
 	/// Creates a new [`Video`] from a path and calls `load()` on it's first frame
-	pub fn new(path: PathBuf) -> Option<Self> {
+	pub fn new(path: PathBuf, start: f32) -> Option<Self> {
 		let mut ffmpeg = FfmpegCommand::new()
 			.hide_banner()
 			.create_no_window()
@@ -50,11 +50,11 @@ impl Video {
 
 		let mut iter = ffmpeg.iter().unwrap().filter_frames();
 
-		let frame = iter.next()?;
+		let first = iter.next()?;
 
 		let fps = {
-			if let Some(next_frame) = iter.next() {
-				(100.0 / (next_frame.timestamp - frame.timestamp)).round() * 0.01
+			if let Some(second) = iter.next() {
+				(100.0 / (second.timestamp - first.timestamp)).round() * 0.01
 			} else {
 				0.0 // "Video" is a still image
 			}
@@ -63,16 +63,16 @@ impl Video {
 		println!("{path:?} fps: {fps}");
 
 		let mut video = Self {
-			frame: Pixmap::from_vec(frame.data, IntSize::from_wh(frame.width, frame.height)?)?,
+			in_width: NonZeroU16::new(first.width as u16)?,
+			in_height: NonZeroU16::new(first.height as u16)?,
+			frame: Pixmap::from_vec(first.data, IntSize::from_wh(first.width, first.height)?)?,
 			path,
-			frame_num: 0,
+			frame_num: 0, // To make the video reload() on first frame
 			fps,
-			duration: 0.0..=f32::MAX,
+			duration: start..=start,
 			x: 0.0,
 			y: 0.0,
 			scale: None,
-			in_width: NonZeroU16::new(frame.width as u16)?,
-			in_height: NonZeroU16::new(frame.height as u16)?,
 			drag: Drag::None,
 			ffmpeg,
 			iter: Box::new(iter)
@@ -89,40 +89,52 @@ impl Video {
 	/// * If it has a larger timestamp, `Video.iter` will advance until it reaches that timestamp
 	/// * If it has a smaller timestamp, `reload()` is called on the [`Video`] and it's `ffmpeg`, `iter` and `frame` are replaced by ones starting at the requested timestamp
 	pub fn load(&mut self, timestamp: f32) {
-		let num = (timestamp * self.fps).round() as u32;
+		let time = timestamp; // - self.duration.start();
 
-		match num.cmp(&self.frame_num) {
-			Ordering::Greater => {
-				let diff = num - self.frame_num;
+		if time >= 0.0 {
+			let num = (timestamp * self.fps).round() as u32;
 
-				let new_frame = if diff == 1 {
-					self.iter.next()
-				} else {
-					self.iter.nth((diff - 1) as usize)
-				};
+			match num.cmp(&self.frame_num) {
+				Ordering::Greater => {
+					let diff = num - self.frame_num;
 
-				if let Some(new_frame) = new_frame {
-					self.frame = Pixmap::from_vec(new_frame.data, IntSize::from_wh(new_frame.width, new_frame.height).unwrap()).unwrap();
-				} else {
-					self.frame = Pixmap::new(1, 1).unwrap();
-				}
+					let new_frame = if diff == 1 {
+						self.iter.next()
+					} else {
+						self.iter.nth((diff - 1) as usize)
+					};
 
-				self.frame_num = num;
-			},
-			Ordering::Less => {
-				// SKIP THIS IF TIMESTAMP IS OUTSIDE VIDEO
+					if let Some(new_frame) = new_frame {
+						self.frame = Pixmap::from_vec(new_frame.data, IntSize::from_wh(new_frame.width, new_frame.height).unwrap()).unwrap();
 
-				self.frame_num = num;
+						// This is not good
+						if timestamp > *self.duration.end() {
+							self.duration = *self.duration.start()..=timestamp;
+						}
+					} else {
+						self.frame = Pixmap::new(1, 1).unwrap();
+					}
 
-				self.reload();
+					self.frame_num = num;
+				},
+				Ordering::Less => {
+					// SKIP THIS IF TIMESTAMP IS OUTSIDE VIDEO
 
-				if let Some(new_frame) = self.iter.next() {
-					self.frame = Pixmap::from_vec(new_frame.data, IntSize::from_wh(new_frame.width, new_frame.height).unwrap()).unwrap();
-				} else {
-					self.frame = Pixmap::new(1, 1).unwrap();
-				}
-			},
-			Ordering::Equal => ()
+					self.frame_num = num;
+
+					self.reload();
+
+					if let Some(new_frame) = self.iter.next() {
+						self.frame = Pixmap::from_vec(new_frame.data, IntSize::from_wh(new_frame.width, new_frame.height).unwrap()).unwrap();
+					} else {
+						self.frame = Pixmap::new(1, 1).unwrap();
+					}
+				},
+				Ordering::Equal => ()
+			}
+		} else {
+			self.frame = Pixmap::new(1, 1).unwrap();
+			self.frame_num = 0;
 		}
 	}
 
