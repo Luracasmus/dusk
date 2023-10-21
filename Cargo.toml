@@ -3,7 +3,7 @@ name = "dusk"
 version = "0.1.0"
 authors = ["Luracasmus"]
 edition = "2021"
-rust-version = "1.72.1"
+rust-version = "1.73.0"
 description = "A small, intuitive video editor in Rust"
 repository = "https://github.com/Luracasmus/dusk"
 keywords = ["ffmpeg", "video", "editor"]
@@ -19,23 +19,27 @@ categories = [
 build = "build.rs"
 
 [dependencies]
+bytemuck = "1.14.0"
 emath = "0.23.0"
 ffmpeg-sidecar = "0.4.1"
 rayon = "1.8.0"
-rfd = "0.12.0"
-tiny-skia = { version = "0.11.2", default-features = false, features = ["std", "simd"] } # Disable png-format
+rayon-macro = "0.2.0"
+#rayon-macro = "0.2.0"
+rfd = "0.12.1"
+#tiny-skia = { version = "0.11.2", default-features = false, features = ["std", "simd"] } # Disable png-format
+tiny-skia = { git = "https://github.com/Luracasmus/tiny-skia.git", default-features = false, features = ["std", "simd"] } # Disable png-format
 
 [build-dependencies]
 embed-manifest = "1.4.0"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 softbuffer = { version = "0.3.1", default-features = false }
-winit = { version = "0.29.1-beta", default-features = false }
+winit = { version = "0.29.2", default-features = false, features = ["rwh_05"] } # for Softbuffer compat
 # Default features are for Linux only
 
 [target.'cfg(target_os = "linux")'.dependencies]
 softbuffer = "0.3.1"
-winit = "0.29.1-beta"
+winit = { version = "0.29.2", features = ["rwh_05"] } # for Softbuffer compat
 
 [profile.release]
 lto = "thin"
