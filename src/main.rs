@@ -44,12 +44,15 @@ use std::{num::NonZeroU32, time::Instant, env::current_dir};
 
 use emath::lerp;
 use ffmpeg_sidecar::download::auto_download;
-use rayon::prelude::*;
+use rayon_macro::parallel;
 use rfd::FileDialog;
 use softbuffer::{Context, Surface};
-use tiny_skia::{BYTES_PER_PIXEL, Pixmap, Color, PixmapPaint, BlendMode, Transform, PathBuilder, Rect, Stroke, LineJoin, Paint, Shader, FillRule, NonZeroRect, Path, PixmapMut};
+use tiny_skia::{Pixmap, Color, PixmapPaint, BlendMode, Transform, PathBuilder, Rect, Stroke, LineJoin, Paint, Shader, FillRule, NonZeroRect, Path, PixmapMut, PremultipliedColorU8};
 use video::{Video, Drag};
-use winit::{event_loop::{EventLoop, DeviceEvents}, window::{WindowBuilder, Icon, Theme, CursorIcon, Fullscreen}, dpi::{LogicalSize, PhysicalPosition}, event::{Event, WindowEvent, KeyEvent, ElementState, MouseScrollDelta}, keyboard::Key};
+use winit::{event_loop::{EventLoop, DeviceEvents}, window::{WindowBuilder, Icon, Theme, CursorIcon, Fullscreen}, dpi::{LogicalSize, PhysicalPosition}, event::{Event, WindowEvent, KeyEvent, ElementState, MouseScrollDelta}, keyboard::{Key, NamedKey}};
+
+const VIDEO_EXTENSIONS: &[&str; 5] = &["webm", "mp4", "mov", "avi", "gif"];
+const IMAGE_EXTENSIONS: &[&str; 4] = &["png", "jpg", "jpeg", "webp"];
 
 #[derive(PartialEq, Eq)]
 enum ClickState {
@@ -59,7 +62,7 @@ enum ClickState {
 }
 
 fn stroke_fill_path(
-	mut pixmap: PixmapMut,
+	pixmap: &mut PixmapMut,
 	path: &Path,
 	stroke_paint: &Paint,
 	fill_paint: &Paint,
@@ -95,7 +98,7 @@ fn main() {
 		icon.fill(background);
 
 		stroke_fill_path(
-			icon.as_mut(),
+			&mut icon.as_mut(),
 			&PathBuilder::from_circle(16.0, 16.0, 8.0).unwrap(),
 			&Paint {
 				shader: Shader::SolidColor(Color::from_rgba8(255, 134, 4, 255)),
@@ -152,171 +155,15 @@ fn main() {
 	let mut gui = true;
 	let mut timeline = 0.0_f32;
 
-	let mut pixmap = {
-		let size = window.inner_size();
-
-		Pixmap::new(size.width, size.height).unwrap()
-	};
+	let mut size = window.inner_size();
 
 	let now = Instant::now();
 	let mut last_elapsed = now.elapsed().as_secs_f32();
 
-	let mut delta = 0.0;
+	let mut delta = 0.0_f32;
 	let mut avg = 0.0_f32;
 
-	event_loop.run(move |event, _, control_flow| { match event {
-		//Event::Resumed => control_flow.set_wait(),
-		Event::RedrawRequested(_) => {
-			let new_elapsed = now.elapsed().as_secs_f32();
-			delta = new_elapsed - last_elapsed;
-			last_elapsed = new_elapsed;
-			let fps = delta.recip();
-			avg = avg.mul_add(29.0, fps) / 30.0;
-			println!("{avg}");
-
-			if playing { playhead += delta; }
-
-			let mut fill = true;
-
-			let occlusion: Vec<_> = videos.iter().enumerate().map(|(i, video)| {
-				let x = video.x;
-				let y = video.y;
-				let w = video.frame.width() as f32;
-				let h = video.frame.height() as f32;
-
-				if
-					x <= 0.0 &&
-					x + w >= pixmap.width() as f32 &&
-					y <= 0.0 &&
-					y + h >= pixmap.height() as f32
-				{
-					fill = false;
-				}
-
-				videos[(i + 1)..].iter().any(|other| {
-					other.x <= x && // left
-					other.x + other.frame.width() as f32 >= x + w && // right
-					other.y <= y && // top
-					other.y + other.frame.height() as f32 >= y + h // bottom
-					//other.y + other.frame.height() as f32 >= x + h // idk why it was x + h
-				})
-			}).collect();
-
-			if fill { pixmap.fill(background); }
-
-			for (video, occluded) in videos.iter_mut().zip(occlusion.into_iter()) { if !occluded {
-				video.load(playhead);
-
-				pixmap.draw_pixmap(
-					(video.x) as i32,
-					(video.y) as i32,
-					video.frame.as_ref(),
-					&PixmapPaint {
-						blend_mode: BlendMode::Source,
-						..Default::default()
-					},
-					if let Some((sx, sy)) = video.scale {
-						NonZeroRect::from_xywh(
-							video.x * (1.0 - sx),
-							video.y * (1.0 - sy),
-							sx,
-							sy
-						).map_or_else(Transform::identity, Transform::from_bbox)
-					} else {
-						Transform::identity()
-					},
-					None
-				);
-			}}
-
-			if timeline > 0.001 {
-				let scr_w = pixmap.width() as f32;
-				let scr_h = pixmap.height() as f32;
-
-				let menu = {
-					let w = scr_w * (timeline - 0.5).max(0.0).mul_add(1.5, 0.05);
-					let h = scr_h * timeline.min(0.5) * 0.15;
-	
-					Rect::from_xywh(
-						scr_w.mul_add(0.5, w * -0.5),
-						scr_h.mul_add(-0.015 * timeline, scr_h - h),
-						w,
-						h
-					)
-				};
-	
-				if let Some(menu) = menu {
-					let alpha = 10.0 * timeline.min(0.1);
-
-					let line = scr_w.min(scr_h) * 0.0025;
-
-					stroke_fill_path(
-						pixmap.as_mut(),
-						&PathBuilder::from_rect(menu),
-						&Paint {
-							shader: Shader::SolidColor(Color::from_rgba8(173, 216, 230, (alpha * 200.0) as u8)),
-							..Paint::default()
-						},
-						&Paint {
-							shader: Shader::SolidColor(Color::from_rgba8(55, 55, 85, (alpha * 125.0) as u8)),
-							..Paint::default()
-						},
-						&Stroke {
-							width: line,
-							line_join: LineJoin::Round,
-							..Default::default()
-						}
-					);
-
-					let zoom = 10.0;
-
-					for (i, video) in videos.iter().enumerate() {
-						let preview = {
-							let l = menu.left() + line;
-							let t = (i as f32).mul_add(-5.0, menu.top() + line);
-							let r = menu.right() - line;
-							let b = (i as f32).mul_add(-5.0, menu.bottom() - line);
-
-							Rect::from_ltrb(
-								(l + video.duration.start() * zoom).min(r),
-								t,
-								(l + video.duration.end() * zoom).min(r),
-								b
-							)
-						};
-
-						if let Some(preview) = preview {
-							stroke_fill_path(
-								pixmap.as_mut(),
-								&PathBuilder::from_rect(preview),
-								&Paint {
-									shader: Shader::SolidColor(Color::from_rgba8(173, 216, 230, (alpha * 175.0) as u8)),
-									..Paint::default()
-								},
-								&Paint {
-									shader: Shader::SolidColor(Color::from_rgba8(35, 35, 55, (alpha * 100.0) as u8)),
-									..Paint::default()
-								},
-								&Stroke {
-									width: line * 0.5,
-									line_join: LineJoin::Round,
-									..Default::default()
-								}
-							);
-						}
-					}
-				}
-			}
-
-			let mut buffer = surface.buffer_mut().unwrap();
-
-			buffer.par_iter_mut().zip(pixmap.data().par_chunks_exact(BYTES_PER_PIXEL)).for_each(|(buf, pix)| {
-				*buf = u32::from_le_bytes([pix[2], pix[1], pix[0], 0]);
-			});
-
-			window.pre_present_notify();
-			buffer.present().unwrap();
-		},
+	event_loop.run(move |event, elwt| { match event {
 		Event::AboutToWait => {
 			for video in videos.iter_mut().rev() {
 				if mouse_state == ClickState::None {
@@ -376,6 +223,164 @@ fn main() {
 			}
 		},
 		Event::WindowEvent { event, .. } => match event {
+			WindowEvent::RedrawRequested => {
+				let new_elapsed = now.elapsed().as_secs_f32();
+				delta = new_elapsed - last_elapsed;
+				last_elapsed = new_elapsed;
+				let fps = delta.recip();
+				avg = avg.mul_add(29.0, fps) / 30.0;
+				println!("{avg}");
+	
+				if playing { playhead += delta; }
+	
+				let mut buffer = surface.buffer_mut().unwrap();
+
+				let mut pixmap = PixmapMut::from_bytes(
+					bytemuck::cast_slice_mut(&mut buffer),
+					size.width,
+					size.height
+				).unwrap();
+
+				let mut fill = true;
+	
+				let occlusion: Vec<_> = videos.iter().enumerate().map(|(i, video)| {
+					let x = video.x;
+					let y = video.y;
+					let w = video.frame.width() as f32;
+					let h = video.frame.height() as f32;
+	
+					if
+						x <= 0.0 &&
+						x + w >= pixmap.width() as f32 &&
+						y <= 0.0 &&
+						y + h >= pixmap.height() as f32
+					{
+						fill = false;
+					}
+	
+					videos[(i + 1)..].iter().any(|other| {
+						other.x <= x && // left
+						other.x + other.frame.width() as f32 >= x + w && // right
+						other.y <= y && // top
+						other.y + other.frame.height() as f32 >= y + h // bottom
+					})
+				}).collect();
+
+				if fill {
+					pixmap.fill(background);
+				}
+	
+				for (video, occluded) in videos.iter_mut().zip(occlusion.into_iter()) { if !occluded {
+					video.load(playhead);
+	
+					pixmap.draw_pixmap(
+						(video.x) as i32,
+						(video.y) as i32,
+						video.frame.as_ref(),
+						&PixmapPaint {
+							blend_mode: BlendMode::Source,
+							..Default::default()
+						},
+						if let Some((sx, sy)) = video.scale {
+							NonZeroRect::from_xywh(
+								video.x * (1.0 - sx),
+								video.y * (1.0 - sy),
+								sx,
+								sy
+							).map_or_else(Transform::identity, Transform::from_bbox)
+						} else {
+							Transform::identity()
+						},
+						None
+					);
+				}}
+	
+				if timeline > 0.001 {
+					let scr_w = pixmap.width() as f32;
+					let scr_h = pixmap.height() as f32;
+	
+					let menu = {
+						let w = scr_w * (timeline - 0.5).max(0.0).mul_add(1.5, 0.05);
+						let h = scr_h * timeline.min(0.5) * 0.15;
+		
+						Rect::from_xywh(
+							scr_w.mul_add(0.5, w * -0.5),
+							scr_h.mul_add(-0.015 * timeline, scr_h - h),
+							w,
+							h
+						)
+					};
+		
+					if let Some(menu) = menu {
+						let alpha = 10.0 * timeline.min(0.1);
+	
+						let line = scr_w.min(scr_h) * 0.0025;
+	
+						stroke_fill_path(
+							&mut pixmap,
+							&PathBuilder::from_rect(menu),
+							&Paint {
+								shader: Shader::SolidColor(Color::from_rgba8(173, 216, 230, (alpha * 200.0) as u8)),
+								..Paint::default()
+							},
+							&Paint {
+								shader: Shader::SolidColor(Color::from_rgba8(55, 55, 85, (alpha * 125.0) as u8)),
+								..Paint::default()
+							},
+							&Stroke {
+								width: line,
+								line_join: LineJoin::Round,
+								..Default::default()
+							}
+						);
+	
+						let zoom = 10.0;
+	
+						for (i, video) in videos.iter().enumerate() {
+							let preview = {
+								let l = menu.left() + line;
+								let t = (i as f32).mul_add(-5.0, menu.top() + line);
+								let r = menu.right() - line;
+								let b = (i as f32).mul_add(-5.0, menu.bottom() - line);
+	
+								Rect::from_ltrb(
+									(l + video.duration.start() * zoom).min(r),
+									t,
+									(l + video.duration.end() * zoom).min(r),
+									b
+								)
+							};
+	
+							if let Some(preview) = preview {
+								stroke_fill_path(
+									&mut pixmap,
+									&PathBuilder::from_rect(preview),
+									&Paint {
+										shader: Shader::SolidColor(Color::from_rgba8(173, 216, 230, (alpha * 175.0) as u8)),
+										..Paint::default()
+									},
+									&Paint {
+										shader: Shader::SolidColor(Color::from_rgba8(35, 35, 55, (alpha * 100.0) as u8)),
+										..Paint::default()
+									},
+									&Stroke {
+										width: line * 0.5,
+										line_join: LineJoin::Round,
+										..Default::default()
+									}
+								);
+							}
+						}
+					}
+				}
+	
+				parallel!(for pix in pixmap.pixels_mut() {
+					*pix = PremultipliedColorU8::from_rgba(pix.blue(), pix.green(), pix.red(), u8::MAX).unwrap();
+				});
+	
+				window.pre_present_notify();
+				buffer.present().unwrap();
+			},
 			WindowEvent::MouseInput { state, .. } => mouse_state = match state {
 				ElementState::Pressed => ClickState::Press,
 				ElementState::Released => {
@@ -402,28 +407,31 @@ fn main() {
 				},
 				..
 			} => match key {
-				Key::Space => playing = !playing,
-				Key::Tab => gui = !gui,
-				Key::ArrowLeft => playhead = (playhead - 5.0).max(0.0),
-				Key::ArrowRight => playhead += 1.0,
-				Key::ArrowUp => scroll -= 0.01,
-				Key::ArrowDown => scroll += 0.01,
-				Key::F11 => window.set_fullscreen(
-					if window.fullscreen().is_none() {
-						Some(Fullscreen::Borderless(None))
-					} else {
-						None
-					}
-				),
-				Key::Delete => videos.retain_mut(|video| {
-					let keep = video.drag == Drag::None;
+				Key::Named(key) => match key {
+					NamedKey::Space => playing = !playing,
+					NamedKey::Tab => gui = !gui,
+					NamedKey::ArrowLeft => playhead = (playhead - 5.0).max(0.0),
+					NamedKey::ArrowRight => playhead += 1.0,
+					NamedKey::ArrowUp => scroll -= 0.005,
+					NamedKey::ArrowDown => scroll += 0.005,
+					NamedKey::F11 => window.set_fullscreen(
+						if window.fullscreen().is_none() {
+							Some(Fullscreen::Borderless(None))
+						} else {
+							None
+						}
+					),
+					NamedKey::Delete => videos.retain_mut(|video| {
+						let keep = video.drag == Drag::None;
 
-					if !keep {
-						let _ = video.ffmpeg.quit();
-					}
+						if !keep {
+							let _ = video.ffmpeg.quit();
+						}
 
-					keep
-				}),
+						keep
+					}),
+					_ => ()
+				},
 				Key::Character(key) => match key.as_str() {
 					"i" => {
 						window.set_visible(false);
@@ -431,8 +439,8 @@ fn main() {
 						let path = current_dir().unwrap();
 
 						let res = FileDialog::new()
-							.add_filter("Video", &["webm", "mp4", "mov", "avi", "gif"])
-							.add_filter("Image", &["png", "jpg", "jpeg", "webp"])
+							.add_filter("Video", VIDEO_EXTENSIONS)
+							.add_filter("Image", IMAGE_EXTENSIONS)
 							.set_directory(path)
 							.set_title("Import")
 							.pick_files();
@@ -455,7 +463,7 @@ fn main() {
 						let res = FileDialog::new()
 							.set_file_name("dusk-export")
 							.set_directory(path)
-							.add_filter("Video", &["webm", "mp4", "mov", "avi", "gif"])
+							.add_filter("Video", VIDEO_EXTENSIONS)
 							.set_title("Export")
 							.save_file();
 
@@ -469,13 +477,13 @@ fn main() {
 				},
 				_ => ()
 			},
-			WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
+			WindowEvent::Resized(new_size) if new_size.width > 0 && new_size.height > 0 => {
 				surface.resize(
-					NonZeroU32::new(size.width).unwrap(),
-					NonZeroU32::new(size.height).unwrap()
+					NonZeroU32::new(new_size.width).unwrap(),
+					NonZeroU32::new(new_size.height).unwrap()
 				).unwrap();
 
-				pixmap = Pixmap::new(size.width, size.height).unwrap();
+				size = new_size;
 			},
 			WindowEvent::DroppedFile(path) => if let Some(video) = Video::new(path, playhead) {
 				videos.push(video);
@@ -485,7 +493,7 @@ fn main() {
 				Theme::Dark => Color::from_rgba8(25, 25, 35, 255),
 				Theme::Light => Color::from_rgba8(225, 225, 235, 255)
 			},
-			WindowEvent::CloseRequested => control_flow.set_exit(),
+			WindowEvent::CloseRequested => elwt.exit(),
 			_ => ()
 		},
 		Event::LoopExiting => for video in &mut videos {
