@@ -1,7 +1,7 @@
 use std::{cmp::Ordering, path::PathBuf, num::NonZeroU16, ops::RangeInclusive};
 
 use ffmpeg_sidecar::{child::FfmpegChild, event::OutputVideoFrame, command::FfmpegCommand};
-use tiny_skia::{Pixmap, IntSize};
+use tiny_skia::{IntSize, Pixmap};
 
 /// Defines in what way a [`Video`] is being manipulated by the user (scale, translate, etc.)
 #[derive(PartialEq, Eq)]
@@ -16,9 +16,9 @@ pub enum Drag {
 
 /// Contains metadata about a specific video as well as the `FFmpeg` instance, iterator and functions required to load frames
 pub struct Video {
-	pub frame: Pixmap,
-	pub x: f32,
-	pub y: f32,
+	pub frame: Option<Pixmap>,
+	pub x: i32,
+	pub y: i32,
 	pub scale: Option<(f32, f32)>,
 	pub drag: Drag,
 	in_width: NonZeroU16,
@@ -29,7 +29,7 @@ pub struct Video {
 	path: PathBuf,
 	frame_num: u32,
 	fps: f32,
-	iter: Box<dyn Iterator<Item = OutputVideoFrame>>
+	iter: Box<dyn Iterator<Item = OutputVideoFrame> + Send>
 }
 
 impl Video {
@@ -48,39 +48,33 @@ impl Video {
 			.pipe_stdout()
 			.spawn().unwrap();
 
-		let mut iter = ffmpeg.iter().unwrap().filter_frames();
+		let mut iter = ffmpeg.iter().unwrap();
 
-		let first = iter.next()?;
+		let metadata = iter.collect_metadata().unwrap();
+		let stream = metadata.output_streams.first()?;
 
-		let fps = {
-			if let Some(second) = iter.next() {
-				(100.0 / (second.timestamp - first.timestamp)).round() * 0.01
-			} else {
-				0.0 // "Video" is a still image
-			}
-		};
+		let fps = stream.fps;
 
-		println!("{path:?} fps: {fps}");
+		if stream.stream_type.as_str() != "Video" || fps == 0.0 {
+			print!("failed");
+			return None;
+		}
 
-		let mut video = Self {
-			in_width: NonZeroU16::new(first.width as u16)?,
-			in_height: NonZeroU16::new(first.height as u16)?,
-			frame: Pixmap::from_vec(first.data, IntSize::from_wh(first.width, first.height)?)?,
+		Some(Self {
+			in_width: NonZeroU16::new(stream.width as u16)?,
+			in_height: NonZeroU16::new(stream.height as u16)?,
+			frame: None,
 			path,
-			frame_num: 0, // To make the video reload() on first frame
+			frame_num: 1, // To make the video reload() on first frame
 			fps,
 			duration: start..=start,
-			x: 0.0,
-			y: 0.0,
+			x: 0,
+			y: 0,
 			scale: None,
 			drag: Drag::None,
 			ffmpeg,
-			iter: Box::new(iter)
-		};
-
-		video.load(0.0); // Undo the iterator advancements above
-
-		Some(video)
+			iter: Box::new(iter.filter_frames())
+		})
 	}
 
 	/// Requests for the [`Video`] to load a new frame into it's `frame` field
@@ -105,14 +99,14 @@ impl Video {
 					};
 
 					if let Some(new_frame) = new_frame {
-						self.frame = Pixmap::from_vec(new_frame.data, IntSize::from_wh(new_frame.width, new_frame.height).unwrap()).unwrap();
+						self.frame = Pixmap::from_vec(new_frame.data, IntSize::from_wh(new_frame.width, new_frame.height).unwrap());
 
 						// This is not good
 						if timestamp > *self.duration.end() {
 							self.duration = *self.duration.start()..=timestamp;
 						}
 					} else {
-						self.frame = Pixmap::new(1, 1).unwrap();
+						self.frame = None;
 					}
 
 					self.frame_num = num;
@@ -125,15 +119,15 @@ impl Video {
 					self.reload();
 
 					if let Some(new_frame) = self.iter.next() {
-						self.frame = Pixmap::from_vec(new_frame.data, IntSize::from_wh(new_frame.width, new_frame.height).unwrap()).unwrap();
+						self.frame = Pixmap::from_vec(new_frame.data, IntSize::from_wh(new_frame.width, new_frame.height).unwrap());
 					} else {
-						self.frame = Pixmap::new(1, 1).unwrap();
+						self.frame = None;
 					}
 				},
 				Ordering::Equal => ()
 			}
 		} else {
-			self.frame = Pixmap::new(1, 1).unwrap();
+			self.frame = None;
 			self.frame_num = 0;
 		}
 	}
@@ -157,7 +151,7 @@ impl Video {
 	///
 	/// This also applies changes from the `in_width` and `in_height` fields
 	fn reload(&mut self) {
-		let _ = self.ffmpeg.quit(); // Probably not good but .unwrap() sometimes panics
+		drop(self.ffmpeg.quit()); // Probably not good but .unwrap() sometimes panics
 
 		self.ffmpeg = FfmpegCommand::new()
 			.hide_banner()
