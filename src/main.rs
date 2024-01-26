@@ -30,26 +30,32 @@
 #![allow(
 	clippy::cargo_common_metadata,
 	clippy::multiple_crate_versions,
+	clippy::module_name_repetitions,
+	clippy::cast_possible_wrap,
 	clippy::cast_precision_loss,
 	clippy::cast_possible_truncation,
 	clippy::cast_sign_loss,
 	clippy::cognitive_complexity,
+	clippy::integer_division,
 	clippy::too_many_lines,
 	clippy::cast_lossless
 )]
 
+mod render;
 mod video;
 
-use std::{num::NonZeroU32, time::Instant, env::current_dir};
+use std::{num::NonZeroU32, time::Instant, env::current_dir, rc::Rc};
 
 use emath::lerp;
-use ffmpeg_sidecar::download::auto_download;
+use ffmpeg_sidecar::{command::ffmpeg_is_installed, ffprobe::ffprobe_is_installed};
 use rayon_macro::parallel;
-use rfd::FileDialog;
+use rfd::{FileDialog, MessageDialog};
 use softbuffer::{Context, Surface};
-use tiny_skia::{Pixmap, Color, PixmapPaint, BlendMode, Transform, PathBuilder, Rect, Stroke, LineJoin, Paint, Shader, FillRule, NonZeroRect, Path, PixmapMut, PremultipliedColorU8};
-use video::{Video, Drag};
+use tiny_skia::{BlendMode, Color, FillRule, LineJoin, Paint, Path, PathBuilder, Pixmap, PixmapMut, PremultipliedColorU8, Rect, Shader, Stroke, Transform, ALPHA_U8_OPAQUE};
 use winit::{event_loop::{EventLoop, DeviceEvents}, window::{WindowBuilder, Icon, Theme, CursorIcon, Fullscreen}, dpi::{LogicalSize, PhysicalPosition}, event::{Event, WindowEvent, KeyEvent, ElementState, MouseScrollDelta}, keyboard::{Key, NamedKey}};
+
+use render::render_frame;
+use video::{Drag, Video};
 
 const VIDEO_EXTENSIONS: &[&str; 5] = &["webm", "mp4", "mov", "avi", "gif"];
 const IMAGE_EXTENSIONS: &[&str; 4] = &["png", "jpg", "jpeg", "webp"];
@@ -86,7 +92,25 @@ fn stroke_fill_path(
 }
 
 fn main() {
-	auto_download().expect("FFmpeg could not be detected or downloaded automatically. Please install the latest FFmpeg manually");
+	if !ffmpeg_is_installed() {
+		MessageDialog::new()
+			.set_level(rfd::MessageLevel::Error)
+			.set_title("FFmpeg not found")
+			.set_description("Please install the latest FFmpeg or place an `ffmpeg` executable adjacent to this program")
+			.show();
+
+		panic!("FFmpeg not found");
+	}
+
+	if !ffprobe_is_installed() {
+		MessageDialog::new()
+			.set_level(rfd::MessageLevel::Error)
+			.set_title("FFprobe not found")
+			.set_description("Please install the latest FFprobe (usually comes with FFmpeg) or place an `ffprobe` executable adjacent to this program")
+			.show();
+
+		panic!("FFprobe not found")
+	}
 
 	let mut background = Color::from_rgba8(25, 25, 35, 255);
 
@@ -118,13 +142,15 @@ fn main() {
 		let w = icon.width();
 		let h = icon.height();
 
-		WindowBuilder::new()
-			.with_title("Dusk")
-			.with_inner_size(LogicalSize::new(2560, 1440))
-			.with_min_inner_size(LogicalSize::new(256, 144))
-			.with_window_icon(Some(Icon::from_rgba(icon.take(), w, h).unwrap()))
-			.build(&event_loop)
-			.unwrap()
+		Rc::new(
+			WindowBuilder::new()
+				.with_title("Dusk")
+				.with_inner_size(LogicalSize::new(1920, 1080))
+				.with_min_inner_size(LogicalSize::new(256, 144))
+				.with_window_icon(Some(Icon::from_rgba(icon.take(), w, h).unwrap()))
+				.build(&event_loop)
+				.unwrap()
+		)
 	};
 
 	window.theme().map_or_else(
@@ -137,9 +163,9 @@ fn main() {
 	});
 
 	let mut surface = {
-		let context = unsafe { Context::new(&window) }.unwrap();
+		let context = Context::new(window.clone()).unwrap();
 
-		unsafe { Surface::new(&context, &window) }.unwrap()
+		Surface::new(&context, window.clone()).unwrap()
 	};
 
 	let mut videos: Vec<Video> = vec![];
@@ -147,55 +173,55 @@ fn main() {
 	let mut playhead = 0.0;
 	let mut playing = false;
 
-	let mut mouse_pos = PhysicalPosition::new(0.0, 0.0);
-	let mut mouse_diff = PhysicalPosition::new(0.0, 0.0);
+	let mut mouse_pos = PhysicalPosition::new(0, 0);
+	let mut mouse_diff = PhysicalPosition::new(0, 0);
 	let mut mouse_state = ClickState::None;
 	let mut scroll = 0.0_f32;
 
-	let mut gui = true;
-	let mut timeline = 0.0_f32;
+	let mut gui_enabled = true;
+	let mut gui = 0.0_f32;
 
 	let mut size = window.inner_size();
 
 	let now = Instant::now();
 	let mut last_elapsed = now.elapsed().as_secs_f32();
-
 	let mut delta = 0.0_f32;
-	let mut avg = 0.0_f32;
 
 	event_loop.run(move |event, elwt| { match event {
 		Event::AboutToWait => {
 			for video in videos.iter_mut().rev() {
-				if mouse_state == ClickState::None {
-					video.drag = Drag::None;
-				} else if mouse_state == ClickState::Press {
-					let half_width = 0.5 * video.frame.width() as f32;
-					let half_height = 0.5 * video.frame.height() as f32;
+				if let Some(frame) = &video.frame {
+					if mouse_state == ClickState::None {
+						video.drag = Drag::None;
+					} else if mouse_state == ClickState::Press {
+						let half_width = frame.width() as i32 / 2;
+						let half_height = frame.height() as i32 / 2;
 
-					if (video.x + half_width - mouse_pos.x).abs() < half_width && (video.y + half_height - mouse_pos.y).abs() < half_height {
-						window.set_cursor_icon(CursorIcon::Move);
-						mouse_state = ClickState::Hold; // No other videos later in the video array can be grabbed
+						if (video.x + half_width - mouse_pos.x).abs() < half_width && (video.y + half_height - mouse_pos.y).abs() < half_height {
+							window.set_cursor_icon(CursorIcon::Move);
+							mouse_state = ClickState::Hold; // No other videos later in the video array can be grabbed
 
-						video.drag = Drag::Move;
+							video.drag = Drag::Move;
+						}
+					} else if video.drag == Drag::Move {
+						video.x += mouse_diff.x;
+						video.y += mouse_diff.y;
+
+						mouse_diff = PhysicalPosition::new(0, 0);
+
+						if scroll.abs() > 0.001 {
+							let (mut sx, mut sy) = video.scale.unwrap_or((1.0, 1.0));
+
+							sx = sx.mul_add(scroll, sx);
+							sy = sy.mul_add(scroll, sy);
+
+							video.scale = Some((sx, sy));
+						}
 					}
-				} else if video.drag == Drag::Move {
-					video.x += mouse_diff.x;
-					video.y += mouse_diff.y;
 
-					mouse_diff = PhysicalPosition::new(0.0, 0.0);
-
-					if scroll.abs() > 0.001 {
-						let (mut sx, mut sy) = video.scale.unwrap_or((1.0, 1.0));
-
-						sx = sx.mul_add(scroll, sx);
-						sy = sy.mul_add(scroll, sy);
-
-						video.scale = Some((sx, sy));
+					if video.scale.is_some() && scroll.abs() < 0.001 {
+						video.resize();
 					}
-				}
-
-				if video.scale.is_some() && scroll.abs() < 0.001 {
-					video.resize();
 				}
 			}
 
@@ -205,10 +231,10 @@ fn main() {
 
 			scroll = lerp(scroll..=0.0, (delta * 5.0).min(1.0));
 
-			if gui {
-				timeline = lerp(timeline..=1.0, (delta * 5.0).min(1.0));
+			if gui_enabled {
+				gui = lerp(gui..=1.0, (delta * 5.0).min(1.0));
 			} else {
-				timeline = lerp(timeline..=0.0, (delta * 5.0).min(1.0));
+				gui = lerp(gui..=0.0, (delta * 5.0).min(1.0));
 			}
 
 			let visible = window.is_visible().map_or(true, |visible| visible);
@@ -227,9 +253,7 @@ fn main() {
 				let new_elapsed = now.elapsed().as_secs_f32();
 				delta = new_elapsed - last_elapsed;
 				last_elapsed = new_elapsed;
-				let fps = delta.recip();
-				avg = avg.mul_add(29.0, fps) / 30.0;
-				println!("{avg}");
+				//println!("{}", delta.recip());
 	
 				if playing { playhead += delta; }
 	
@@ -241,78 +265,26 @@ fn main() {
 					size.height
 				).unwrap();
 
-				let mut fill = true;
-	
-				let occlusion: Vec<_> = videos.iter().enumerate().map(|(i, video)| {
-					let x = video.x;
-					let y = video.y;
-					let w = video.frame.width() as f32;
-					let h = video.frame.height() as f32;
-	
-					if
-						x <= 0.0 &&
-						x + w >= pixmap.width() as f32 &&
-						y <= 0.0 &&
-						y + h >= pixmap.height() as f32
-					{
-						fill = false;
-					}
-	
-					videos[(i + 1)..].iter().any(|other| {
-						other.x <= x && // left
-						other.x + other.frame.width() as f32 >= x + w && // right
-						other.y <= y && // top
-						other.y + other.frame.height() as f32 >= y + h // bottom
-					})
-				}).collect();
+				render_frame(&mut pixmap, &mut videos, playhead, background);
 
-				if fill {
-					pixmap.fill(background);
-				}
-	
-				for (video, occluded) in videos.iter_mut().zip(occlusion.into_iter()) { if !occluded {
-					video.load(playhead);
-	
-					pixmap.draw_pixmap(
-						(video.x) as i32,
-						(video.y) as i32,
-						video.frame.as_ref(),
-						&PixmapPaint {
-							blend_mode: BlendMode::Source,
-							..Default::default()
-						},
-						if let Some((sx, sy)) = video.scale {
-							NonZeroRect::from_xywh(
-								video.x * (1.0 - sx),
-								video.y * (1.0 - sy),
-								sx,
-								sy
-							).map_or_else(Transform::identity, Transform::from_bbox)
-						} else {
-							Transform::identity()
-						},
-						None
-					);
-				}}
-	
-				if timeline > 0.001 {
+				if gui > 0.001 {
 					let scr_w = pixmap.width() as f32;
 					let scr_h = pixmap.height() as f32;
 	
 					let menu = {
-						let w = scr_w * (timeline - 0.5).max(0.0).mul_add(1.5, 0.05);
-						let h = scr_h * timeline.min(0.5) * 0.15;
+						let w = scr_w * (gui - 0.5).max(0.0).mul_add(1.5, 0.05);
+						let h = scr_h * gui.min(0.5) * 0.15;
 		
 						Rect::from_xywh(
 							scr_w.mul_add(0.5, w * -0.5),
-							scr_h.mul_add(-0.015 * timeline, scr_h - h),
+							scr_h.mul_add(-0.015 * gui, scr_h - h),
 							w,
 							h
 						)
 					};
 		
 					if let Some(menu) = menu {
-						let alpha = 10.0 * timeline.min(0.1);
+						let alpha = 10.0 * gui.min(0.1);
 	
 						let line = scr_w.min(scr_h) * 0.0025;
 	
@@ -375,7 +347,7 @@ fn main() {
 				}
 	
 				parallel!(for pix in pixmap.pixels_mut() {
-					*pix = PremultipliedColorU8::from_rgba(pix.blue(), pix.green(), pix.red(), u8::MAX).unwrap();
+					*pix = PremultipliedColorU8::from_rgba(pix.blue(), pix.green(), pix.red(), ALPHA_U8_OPAQUE).unwrap();
 				});
 	
 				window.pre_present_notify();
@@ -390,12 +362,12 @@ fn main() {
 			},
 			WindowEvent::CursorMoved { position, .. } => {
 				if mouse_state == ClickState::Hold {
-					mouse_diff.x += position.x as f32 - mouse_pos.x;
-					mouse_diff.y += position.y as f32 - mouse_pos.y;
+					mouse_diff.x += position.x as i32 - mouse_pos.x;
+					mouse_diff.y += position.y as i32 - mouse_pos.y;
 				}
 
-				mouse_pos.x = position.x as f32;
-				mouse_pos.y = position.y as f32;
+				mouse_pos.x = position.x as i32;
+				mouse_pos.y = position.y as i32;
 			},
 			WindowEvent::MouseWheel { delta: MouseScrollDelta::LineDelta(_, y), .. } => scroll -= y * 0.0125,
 			WindowEvent::KeyboardInput {
@@ -409,7 +381,7 @@ fn main() {
 			} => match key {
 				Key::Named(key) => match key {
 					NamedKey::Space => playing = !playing,
-					NamedKey::Tab => gui = !gui,
+					NamedKey::Tab => gui_enabled = !gui_enabled,
 					NamedKey::ArrowLeft => playhead = (playhead - 5.0).max(0.0),
 					NamedKey::ArrowRight => playhead += 1.0,
 					NamedKey::ArrowUp => scroll -= 0.005,
@@ -425,7 +397,7 @@ fn main() {
 						let keep = video.drag == Drag::None;
 
 						if !keep {
-							let _ = video.ffmpeg.quit();
+							drop(video.ffmpeg.quit());
 						}
 
 						keep
@@ -454,7 +426,7 @@ fn main() {
 						}
 
 						window.set_visible(true);
-					}
+					},
 					"e" => {
 						window.set_visible(false);
 
@@ -497,7 +469,7 @@ fn main() {
 			_ => ()
 		},
 		Event::LoopExiting => for video in &mut videos {
-			let _ = video.ffmpeg.quit();
+			drop(video.ffmpeg.quit());
 		},
 		_ => ()
 	}}).unwrap();
