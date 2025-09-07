@@ -45,7 +45,8 @@ fn main() {
                 sys_pick_video,
                 sys_export_video,
                 sys_active_videos,
-                (sys_add_video, sys_inactive_videos).chain(), // we want the added video to be initialized by the inactive video system right away
+                sys_inactive_videos,
+                sys_add_video,
             ),
         )
         .add_systems(Update, sys_playing.run_if(in_state(PlayerState::Playing)))
@@ -110,8 +111,8 @@ fn sys_scrub(
         playhead.0 = (playhead.0 - 5.0).max(0.0);
     } else if keys.pressed(KeyCode::ArrowRight) {
         playhead.0 += match plr_state.get() {
-            PlayerState::Paused => 0.01,
-            PlayerState::Playing => 0.1,
+            PlayerState::Paused => 0.001,
+            PlayerState::Playing => 0.5,
         };
     }
 }

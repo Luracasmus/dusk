@@ -5,6 +5,7 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 use ffmpeg_sidecar::{
+    child::FfmpegChild,
     command::FfmpegCommand,
     event::{OutputVideoFrame, StreamTypeSpecificData},
 };
@@ -17,12 +18,31 @@ use std::{
     sync::Mutex,
 };
 
+// Wrapper to make the FFmpeg child process quit gracefully on drop
+struct FFmpegWrapper(FfmpegChild);
+
+impl Drop for FFmpegWrapper {
+    fn drop(&mut self) {
+        if let Err(err) = self.0.quit() {
+            println!(
+                "Failed to request FFmpeg child process to gracefully quit: {err}\nKilling it instead"
+            );
+
+            self.0.kill().expect("Failed to kill FFmpeg child process");
+        }
+
+        // We skip waiting and just hope the process always quits
+        // self.0.wait().unwrap();
+    }
+}
+
 struct Decoder {
-    iter: Mutex<Box<dyn Iterator<Item = OutputVideoFrame> + Send>>,
     frame: u32,
     fps: f32,
     width: NonZero<u16>,
     height: NonZero<u16>,
+    iter: Mutex<Box<dyn Iterator<Item = OutputVideoFrame> + Send>>,
+    _ffmpeg: FFmpegWrapper, // The field order here (determines drop order) seems to be important for the FFmpeg child process to quit properly
 }
 
 impl Decoder {
@@ -39,7 +59,7 @@ impl Decoder {
             command.seek(seek.to_string());
         }
 
-        let mut iter = command
+        let mut ffmpeg = command
             .input(path.to_str().unwrap())
             .format("rawvideo")
             .pix_fmt("rgba")
@@ -47,9 +67,9 @@ impl Decoder {
             .no_overwrite()
             .pipe_stdout()
             .spawn()
-            .unwrap()
-            .iter()
             .unwrap();
+
+        let mut iter = ffmpeg.iter().unwrap();
 
         let metadata = iter.collect_metadata().unwrap();
         let stream = metadata.output_streams.first()?; // is the video always the first stream?
@@ -60,6 +80,7 @@ impl Decoder {
 
             Some((
                 Self {
+                    _ffmpeg: FFmpegWrapper(ffmpeg),
                     iter: Mutex::new(Box::new(frame_iter)),
                     frame: (seek * video_stream.fps) as u32,
                     fps: video_stream.fps,
