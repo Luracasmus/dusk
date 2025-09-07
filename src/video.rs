@@ -1,173 +1,222 @@
-use std::{cmp::Ordering, path::PathBuf, num::NonZeroU16, ops::RangeInclusive};
+use bevy::{
+    asset::RenderAssetUsages,
+    math::{U16Vec2, UVec2},
+    prelude::*,
+    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
+};
+use ffmpeg_sidecar::{
+    command::FfmpegCommand,
+    event::{OutputVideoFrame, StreamTypeSpecificData},
+};
 
-use ffmpeg_sidecar::{child::FfmpegChild, event::OutputVideoFrame, command::FfmpegCommand};
-use tiny_skia::{IntSize, Pixmap};
+use std::{
+    cmp::Ordering,
+    num::NonZero,
+    ops::Range,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
-/// Defines in what way a [`Video`] is being manipulated by the user (scale, translate, etc.)
-#[derive(PartialEq, Eq)]
-pub enum Drag {
-	Move,
-	//TopLeft,
-	//TopRight,
-	//BottomLeft,
-	//BottomRight,
-	None
+struct Decoder {
+    iter: Mutex<Box<dyn Iterator<Item = OutputVideoFrame> + Send>>,
+    frame: u32,
+    fps: f32,
+    width: NonZero<u16>,
+    height: NonZero<u16>,
 }
 
-/// Contains metadata about a specific video as well as the `FFmpeg` instance, iterator and functions required to load frames
-pub struct Video {
-	pub frame: Option<Pixmap>,
-	pub x: i32,
-	pub y: i32,
-	pub scale: Option<(f32, f32)>,
-	pub drag: Drag,
-	in_width: NonZeroU16,
-	in_height: NonZeroU16,
-	pub ffmpeg: FfmpegChild,
-	pub duration: RangeInclusive<f32>,
+impl Decoder {
+    fn new(path: &Path, seek: f32, size: UVec2) -> Option<(Self, Vec<u8>)> {
+        let mut command = FfmpegCommand::new();
+        command
+            .hide_banner()
+            .create_no_window()
+            .no_audio()
+            .args(["-sn", "-dn"])
+            .hwaccel("auto");
 
-	path: PathBuf,
-	frame_num: u32,
-	fps: f32,
-	iter: Box<dyn Iterator<Item = OutputVideoFrame> + Send>
+        if seek != 0.0 {
+            command.seek(seek.to_string());
+        }
+
+        let mut iter = command
+            .input(path.to_str().unwrap())
+            .format("rawvideo")
+            .pix_fmt("rgba")
+            .size(size.x, size.y)
+            .no_overwrite()
+            .pipe_stdout()
+            .spawn()
+            .unwrap()
+            .iter()
+            .unwrap();
+
+        let metadata = iter.collect_metadata().unwrap();
+        let stream = metadata.output_streams.first()?; // is the video always the first stream?
+
+        if let StreamTypeSpecificData::Video(video_stream) = &stream.type_specific_data {
+            let mut frame_iter = iter.filter_frames();
+            let first_frame = frame_iter.next()?;
+
+            Some((
+                Self {
+                    iter: Mutex::new(Box::new(frame_iter)),
+                    frame: (seek * video_stream.fps) as u32,
+                    fps: video_stream.fps,
+                    width: NonZero::new(video_stream.width as u16)?,
+                    height: NonZero::new(video_stream.height as u16)?,
+                },
+                first_frame.data,
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Default, Resource)]
+pub struct Playhead(pub f32);
+
+#[derive(Resource)]
+pub struct Resolution(pub U16Vec2);
+
+#[derive(Component)]
+pub struct Video {
+    pub duration: Range<f32>,
+    pub shift: f32, // 0..
+    pub size: Vec2, // 0..=1.0
+    pub source: PathBuf,
+    decoder: Option<Decoder>,
 }
 
 impl Video {
-	/// Creates a new [`Video`] from a path and calls `load()` on it's first frame
-	pub fn new(path: PathBuf, start: f32) -> Option<Self> {
-		let mut ffmpeg = FfmpegCommand::new()
-			.hide_banner()
-			.create_no_window()
-			.no_audio()
-			.args(["-sn", "-dn"])
-			.hwaccel("auto")
-			.input(path.to_str().unwrap())
-			.format("rawvideo")
-			.pix_fmt("rgba")
-			.no_overwrite()
-			.pipe_stdout()
-			.spawn().unwrap();
+    pub const fn new_inactive(source: PathBuf, start: f32) -> Self {
+        Self {
+            duration: start..f32::INFINITY,
+            shift: 0.0,
+            size: Vec2::ONE,
+            source,
+            decoder: None,
+        }
+    }
+}
 
-		let mut iter = ffmpeg.iter().unwrap();
+pub fn sys_inactive_videos(
+    mut commands: Commands,
+    mut inactive_videos: Query<(Entity, &mut Video), Without<Sprite>>,
+    mut images: ResMut<Assets<Image>>,
+    playhead: Res<Playhead>,
+    resolution: Res<Resolution>,
+) {
+    for (entity, mut video) in &mut inactive_videos {
+        if video.duration.contains(&playhead.0) {
+            let scaled_size = (video.size * resolution.0.as_vec2()).as_uvec2();
 
-		let metadata = iter.collect_metadata().unwrap();
-		let stream = metadata.output_streams.first()?;
+            if let Some((new_decoder, first_frame)) =
+                Decoder::new(&video.source, playhead.0, scaled_size)
+            {
+                println!(
+                    "Made video active {{ source: {}, duration: {:?}, shift: {}, size: {}, Decoder {{ fps: {}, frame: {}, width: {}, height: {} }} }}",
+                    video.source.display(),
+                    video.duration,
+                    video.shift,
+                    video.size,
+                    new_decoder.fps,
+                    new_decoder.frame,
+                    new_decoder.width,
+                    new_decoder.height
+                );
+                video.decoder = Some(new_decoder);
 
-		let fps = stream.fps;
+                commands
+                    .entity(entity)
+                    .insert(Sprite::from_image(images.add(Image::new(
+                        Extent3d {
+                            width: scaled_size.x,
+                            height: scaled_size.y,
+                            depth_or_array_layers: 1,
+                        },
+                        TextureDimension::D2,
+                        first_frame,
+                        TextureFormat::Rgba8Unorm,
+                        RenderAssetUsages::default(),
+                    ))));
+            } else {
+                println!("Failed to create decoder: {}", video.source.display());
+                todo!();
+            }
+        }
+    }
+}
 
-		if stream.stream_type.as_str() != "Video" || fps == 0.0 {
-			print!("failed");
-			return None;
-		}
+pub fn sys_active_videos(
+    mut commands: Commands,
+    mut active_videos: Query<(Entity, &mut Video, &Sprite)>,
+    mut images: ResMut<Assets<Image>>,
+    playhead: Res<Playhead>,
+    resolution: Res<Resolution>,
+) {
+    for (entity, mut video, sprite) in &mut active_videos {
+        let duration = video.duration.clone();
+        let shift = video.shift;
+        let source = video.source.clone();
+        let size = video.size;
 
-		Some(Self {
-			in_width: NonZeroU16::new(stream.width as u16)?,
-			in_height: NonZeroU16::new(stream.height as u16)?,
-			frame: None,
-			path,
-			frame_num: 1, // To make the video reload() on first frame
-			fps,
-			duration: start..=start,
-			x: 0,
-			y: 0,
-			scale: None,
-			drag: Drag::None,
-			ffmpeg,
-			iter: Box::new(iter.filter_frames())
-		})
-	}
+        if let Some(decoder) = &mut video.decoder {
+            if duration.contains(&playhead.0) {
+                let requested_frame = ((playhead.0 - shift) * decoder.fps) as u32;
 
-	/// Requests for the [`Video`] to load a new frame into it's `frame` field
-	///
-	/// * If the frame has the same timestamp as the last frame, nothing is changed
-	/// * If it has a larger timestamp, `Video.iter` will advance until it reaches that timestamp
-	/// * If it has a smaller timestamp, `reload()` is called on the [`Video`] and it's `ffmpeg`, `iter` and `frame` are replaced by ones starting at the requested timestamp
-	pub fn load(&mut self, timestamp: f32) {
-		let time = timestamp; // - self.duration.start();
+                match requested_frame.cmp(&decoder.frame) {
+                    Ordering::Equal => (),
+                    Ordering::Greater => {
+                        let diff = requested_frame - decoder.frame;
+                        decoder.frame = requested_frame;
 
-		if time >= 0.0 {
-			let num = (timestamp * self.fps).round() as u32;
+                        let single_frame = diff == 1;
+                        let step = (diff - 1) as usize;
 
-			match num.cmp(&self.frame_num) {
-				Ordering::Greater => {
-					let diff = num - self.frame_num;
+                        let new_frame = {
+                            let mut iter = decoder.iter.lock().unwrap();
 
-					let new_frame = if diff == 1 {
-						self.iter.next()
-					} else {
-						self.iter.nth((diff - 1) as usize)
-					};
+                            if single_frame {
+                                iter.next()
+                            } else {
+                                iter.nth(step)
+                            }
+                        };
 
-					if let Some(new_frame) = new_frame {
-						self.frame = Pixmap::from_vec(new_frame.data, IntSize::from_wh(new_frame.width, new_frame.height).unwrap());
+                        println!(
+                            "Playing video: {{ source: {}, requested_frame: {requested_frame} diff: {diff} }}",
+                            source.display()
+                        );
 
-						// This is not good
-						if timestamp > *self.duration.end() {
-							self.duration = *self.duration.start()..=timestamp;
-						}
-					} else {
-						self.frame = None;
-					}
+                        if let Some(new_frame) = new_frame {
+                            images.get_mut(sprite.image.id()).unwrap().data = Some(new_frame.data);
+                        } else {
+                            video.duration.end = playhead.0; // is this jank?
+                        }
+                    }
+                    Ordering::Less => {
+                        if let Some((new_decoder, first_frame)) = Decoder::new(
+                            &source,
+                            playhead.0,
+                            (size * resolution.0.as_vec2()).as_uvec2(),
+                        ) {
+                            *decoder = new_decoder;
+                            images.get_mut(sprite.image.id()).unwrap().data = Some(first_frame);
+                        } else {
+                            todo!()
+                            // something has gone very wrong
+                        }
+                    }
+                }
+            } else {
+                println!("Made video inactive: {}", video.source.display());
 
-					self.frame_num = num;
-				},
-				Ordering::Less => {
-					// SKIP THIS IF TIMESTAMP IS OUTSIDE VIDEO
-
-					self.frame_num = num;
-
-					self.reload();
-
-					if let Some(new_frame) = self.iter.next() {
-						self.frame = Pixmap::from_vec(new_frame.data, IntSize::from_wh(new_frame.width, new_frame.height).unwrap());
-					} else {
-						self.frame = None;
-					}
-				},
-				Ordering::Equal => ()
-			}
-		} else {
-			self.frame = None;
-			self.frame_num = 0;
-		}
-	}
-
-	/// Multiplies the [`Video`]'s `in_width` and `in_height` fields by it's `scale` field, which is then set to None
-	///
-	/// It also advances the `iter` field by `1` frame and then `-1` frame in order to force the video to `reload()` and apply the new `width` and `height`
-	pub fn resize(&mut self) {
-		let (sx, sy) = self.scale.expect("Resized Video with no Scale");
-
-		self.in_width = NonZeroU16::new(((self.in_width.get() as f32 * sx).round() as u16).max(1)).unwrap();
-		self.in_height = NonZeroU16::new(((self.in_height.get() as f32 * sy).round() as u16).max(1)).unwrap();
-
-		self.scale = None;
-
-		self.load((self.frame_num + 1) as f32 / self.fps);
-		self.load((self.frame_num - 1) as f32 / self.fps);
-	}
-
-	/// Replaces the [`Video`]'s `ffmpeg` and `iter` fields with new ones starting from `Video.timestamp`
-	///
-	/// This also applies changes from the `in_width` and `in_height` fields
-	fn reload(&mut self) {
-		drop(self.ffmpeg.quit()); // Probably not good but .unwrap() sometimes panics
-
-		self.ffmpeg = FfmpegCommand::new()
-			.hide_banner()
-			.create_no_window()
-			.no_audio()
-			.args(["-sn", "-dn"])
-			.hwaccel("auto")
-			.seek((self.frame_num as f32 / self.fps).to_string())
-			.input(self.path.to_str().unwrap())
-			.format("rawvideo")
-			.pix_fmt("rgba")
-			.size(self.in_width.get() as u32, self.in_height.get() as u32)
-			.no_overwrite()
-			.pipe_stdout()
-			.spawn().unwrap();
-
-		self.iter = Box::new(self.ffmpeg.iter().unwrap().filter_frames());
-	}
+                video.decoder = None;
+                images.remove(sprite.image.id());
+                commands.entity(entity).remove::<Sprite>();
+            }
+        }
+    }
 }

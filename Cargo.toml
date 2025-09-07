@@ -2,8 +2,8 @@
 name = "dusk"
 version = "0.1.0"
 authors = ["Luracasmus"]
-edition = "2021"
-rust-version = "1.75.0"
+edition = "2024"
+rust-version = "1.89.0"
 description = "A small, intuitive video editor in Rust"
 repository = "https://github.com/Luracasmus/dusk"
 keywords = ["ffmpeg", "video", "editor"]
@@ -16,28 +16,47 @@ categories = [
 	# "multimedia::encoding",
 	# "encoding"
 ]
-build = "build.rs"
 
 [dependencies]
-bytemuck = "1.14.1"
-emath = "0.25.0"
-ffmpeg-sidecar = "0.5.1"
-rayon = "1.8.1"
-rayon-macro = "0.2.0"
-rfd = "0.13.0"
-tiny-skia = { version = "0.11.2", default-features = false, features = ["std", "simd"] } # Disable png-format
-#tiny-skia = { git = "https://github.com/Luracasmus/tiny-skia.git", default-features = false, features = ["std", "simd"] } # Disable png-format
-
-[build-dependencies]
-embed-manifest = "1.4.0"
-
-[target.'cfg(not(target_os = "linux"))'.dependencies]
-softbuffer = { version = "0.4.1", default-features = false }
-winit = { version = "0.29.10", default-features = false, features = ["rwh_06"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-softbuffer = "0.4.1"
-winit = "0.29.10"
+bevy = { version = "0.16.1", default-features = false, features = [
+	"std",
+	"async_executor",
+	# "animation",
+	"bevy_asset",
+	# "bevy_audio",
+	"bevy_color",
+	"bevy_core_pipeline",
+	# "bevy_gilrs",
+	# "bevy_gizmos",
+	# "bevy_gltf",
+	# "bevy_input_focus",
+	# "bevy_log",
+	# "bevy_mesh_picking_backend",
+	# "bevy_picking",
+	"bevy_render",
+	# "bevy_scene",
+	"bevy_sprite",
+	# "bevy_sprite_picking_backend",
+	"bevy_state",
+	# "bevy_text",
+	# "bevy_ui",
+	# "bevy_ui_picking_backend",
+	"bevy_window",
+	"bevy_winit",
+	# "custom_cursor",
+	# "default_font",
+	# "hdr",
+	"multi_threaded",
+	# "png",
+	# "smaa_luts",
+	# "sysinfo_plugin",
+	# "tonemapping_luts",
+	# "vorbis",
+	"wayland",
+] }
+bevy_file_dialog = "0.8.0"
+ffmpeg-sidecar = { version = "2.2.0", default-features = false }
+rfd = "0.15.4"
 
 [profile.release]
 lto = "thin"
@@ -51,3 +70,40 @@ debug-assertions = false
 overflow-checks = false
 strip = "symbols"
 codegen-units = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+codegen-units = 1
+
+[lints.clippy]
+cargo = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+filetype_is_file = "warn"
+float_cmp_const = "warn"
+fn_to_numeric_cast_any = "warn"
+format_push_string = "warn"
+get_unwrap = "warn"
+mem_forget = "warn"
+unneeded_field_pattern = "warn"
+unseparated_literal_suffix = "warn"
+string_to_string = "warn"
+suspicious_xor_used_as_pow = "warn"
+rc_mutex = "warn"
+ref_patterns = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+
+cargo_common_metadata = "allow"
+cast_lossless = "allow"
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cognitive_complexity = "allow"
+integer_division = "allow"
+module_name_repetitions = "allow"
+multiple_crate_versions = "allow"
+needless_pass_by_value = "allow"
+too_many_lines = "allow"
+wildcard_imports = "allow"
