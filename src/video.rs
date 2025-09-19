@@ -46,6 +46,7 @@ struct Decoder {
 }
 
 impl Decoder {
+    #[must_use]
     fn new(path: &Path, seek: f32, size: UVec2) -> Option<(Self, Vec<u8>)> {
         let mut command = FfmpegCommand::new();
         command
@@ -59,10 +60,12 @@ impl Decoder {
             command.seek(seek.to_string());
         }
 
+        // todo!() look into .duration and .readrate
+
         let mut ffmpeg = command
             .input(path.to_str().unwrap())
             .format("rawvideo")
-            .pix_fmt("rgba")
+            .pix_fmt("rgba") // todo!() let FFmpeg pick this automatically and choose the Image format accordingly, reconstructing the Decoder if none of the formats match
             .size(size.x, size.y)
             .no_overwrite()
             .pipe_stdout()
@@ -111,6 +114,7 @@ pub struct Video {
 }
 
 impl Video {
+    #[must_use]
     pub const fn new_inactive(source: PathBuf, start: f32) -> Self {
         Self {
             duration: start..f32::INFINITY,
@@ -159,7 +163,7 @@ pub fn sys_inactive_videos(
                         },
                         TextureDimension::D2,
                         first_frame,
-                        TextureFormat::Rgba8Unorm,
+                        TextureFormat::Rgba8UnormSrgb,
                         RenderAssetUsages::default(),
                     ))));
             } else {
@@ -214,7 +218,8 @@ pub fn sys_active_videos(
                         if let Some(new_frame) = new_frame {
                             images.get_mut(sprite.image.id()).unwrap().data = Some(new_frame.data);
                         } else {
-                            video.duration.end = playhead.0; // is this jank?
+                            todo!(); // return a completely red frame or something, to warn the user
+                            // video.duration.end = playhead.0; // is this jank?
                         }
                     }
                     Ordering::Less => {

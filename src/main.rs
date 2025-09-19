@@ -1,6 +1,7 @@
 use bevy::{
+    math::U16Vec2,
     prelude::*,
-    window::{CompositeAlphaMode, ExitCondition, WindowResolution},
+    window::{CompositeAlphaMode, ExitCondition, WindowResized, WindowResolution},
 };
 use bevy_file_dialog::FileDialogPlugin;
 use ffmpeg_sidecar::command::ffmpeg_is_installed;
@@ -47,9 +48,10 @@ fn main() {
                 sys_active_videos,
                 sys_inactive_videos,
                 sys_add_video,
+                sys_playing.run_if(in_state(PlayerState::Playing)),
+                sys_window_resize.run_if(on_event::<WindowResized>),
             ),
         )
-        .add_systems(Update, sys_playing.run_if(in_state(PlayerState::Playing)))
         .init_resource::<Playhead>()
         .insert_resource(Resolution(WindowResolution::default().size().as_u16vec2()))
         .run();
@@ -119,4 +121,13 @@ fn sys_scrub(
 
 fn sys_playing(mut playhead: ResMut<Playhead>, time: Res<Time>) {
     playhead.0 += time.delta_secs();
+}
+
+fn sys_window_resize(
+    mut resize_reader: EventReader<WindowResized>,
+    mut resolution: ResMut<Resolution>,
+) {
+    if let Some(new_resolution) = resize_reader.read().last() {
+        resolution.0 = U16Vec2::new(new_resolution.width as u16, new_resolution.height as u16);
+    }
 }

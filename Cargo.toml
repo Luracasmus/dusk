@@ -3,7 +3,7 @@ name = "dusk"
 version = "0.1.0"
 authors = ["Luracasmus"]
 edition = "2024"
-rust-version = "1.89.0"
+rust-version = "1.90.0"
 description = "A small, intuitive video player and editor in Rust"
 repository = "https://github.com/Luracasmus/dusk"
 keywords = ["ffmpeg", "video", "editor"]
@@ -58,6 +58,9 @@ bevy_file_dialog = "0.8.0"
 ffmpeg-sidecar = { version = "2.2.0", default-features = false }
 rfd = "0.15.4"
 
+[profile.dev]
+debug = false
+
 [profile.release]
 lto = "thin"
 strip = "symbols"
@@ -72,6 +75,7 @@ strip = "symbols"
 codegen-units = 1
 
 [profile.dev.package."*"]
+debug = false
 opt-level = 3
 codegen-units = 1
 
