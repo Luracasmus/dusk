@@ -49,7 +49,7 @@ fn main() {
                 sys_inactive_videos,
                 sys_add_video,
                 sys_playing.run_if(in_state(PlayerState::Playing)),
-                sys_window_resize.run_if(on_event::<WindowResized>),
+                sys_window_resize.run_if(on_message::<WindowResized>), // TODO: Maybe use observers instead
             ),
         )
         .init_resource::<Playhead>()
@@ -124,7 +124,7 @@ fn sys_playing(mut playhead: ResMut<Playhead>, time: Res<Time>) {
 }
 
 fn sys_window_resize(
-    mut resize_reader: EventReader<WindowResized>,
+    mut resize_reader: MessageReader<WindowResized>,
     mut resolution: ResMut<Resolution>,
 ) {
     if let Some(new_resolution) = resize_reader.read().last() {

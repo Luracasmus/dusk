@@ -24,7 +24,7 @@ pub fn sys_pick_video(mut commands: Commands, keys: Res<ButtonInput<KeyCode>>) {
 
 pub fn sys_add_video(
     mut commands: Commands,
-    mut add: EventReader<DialogFilePicked<AddVideoFile>>,
+    mut add: MessageReader<DialogFilePicked<AddVideoFile>>,
     playhead: Res<Playhead>,
 ) {
     if add.is_empty() {
@@ -40,7 +40,7 @@ pub fn sys_add_video(
     }
 }
 
-pub fn sys_export_video(mut export: EventReader<DialogFilePicked<ExportVideoFile>>) {
+pub fn sys_export_video(mut export: MessageReader<DialogFilePicked<ExportVideoFile>>) {
     if export.is_empty() {
         return;
     }

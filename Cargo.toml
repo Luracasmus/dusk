@@ -17,44 +17,31 @@ categories = [
 	# "encoding"
 ]
 
+[features]
+default = ["wayland"]
+wayland = ["bevy/wayland"]
+x11 = ["bevy/x11"]
+debug = ["bevy/debug", "bevy/bevy_log", "bevy/sysinfo_plugin"]
+
 [dependencies]
-bevy = { version = "0.16.1", default-features = false, features = [
+bevy = { version = "0.17.2", default-features = false, features = [
 	"std",
 	"async_executor",
-	# "animation",
 	"bevy_asset",
-	# "bevy_audio",
 	"bevy_color",
 	"bevy_core_pipeline",
-	# "bevy_gilrs",
-	# "bevy_gizmos",
-	# "bevy_gltf",
-	# "bevy_input_focus",
-	# "bevy_log",
-	# "bevy_mesh_picking_backend",
-	# "bevy_picking",
 	"bevy_render",
-	# "bevy_scene",
+	"bevy_image",
+	"bevy_camera",
 	"bevy_sprite",
-	# "bevy_sprite_picking_backend",
+	"bevy_sprite_render",
 	"bevy_state",
-	# "bevy_text",
-	# "bevy_ui",
-	# "bevy_ui_picking_backend",
 	"bevy_window",
 	"bevy_winit",
-	# "custom_cursor",
-	# "default_font",
-	# "hdr",
 	"multi_threaded",
-	# "png",
-	# "smaa_luts",
-	# "sysinfo_plugin",
-	# "tonemapping_luts",
-	# "vorbis",
-	"wayland",
+	"reflect_auto_register",
 ] }
-bevy_file_dialog = "0.8.0"
+bevy_file_dialog = "0.9.0"
 ffmpeg-sidecar = { version = "2.2.0", default-features = false }
 rfd = "0.15.4"
 
@@ -78,6 +65,9 @@ codegen-units = 1
 debug = false
 opt-level = 3
 codegen-units = 1
+
+[lints.rust]
+unsafe_code = "deny"
 
 [lints.clippy]
 cargo = { level = "warn", priority = -1 }
@@ -111,3 +101,6 @@ multiple_crate_versions = "allow"
 needless_pass_by_value = "allow"
 too_many_lines = "allow"
 wildcard_imports = "allow"
+needless_for_each = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
