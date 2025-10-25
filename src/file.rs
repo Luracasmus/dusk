@@ -3,7 +3,10 @@ use bevy_file_dialog::prelude::*;
 
 use crate::video::*;
 
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct AddVideoFile;
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct ExportVideoFile;
 
 pub fn sys_pick_video(mut commands: Commands, keys: Res<ButtonInput<KeyCode>>) {

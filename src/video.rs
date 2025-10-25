@@ -1,6 +1,7 @@
 use bevy::{
     asset::RenderAssetUsages,
     math::{U16Vec2, UVec2},
+    platform::cell::SyncCell,
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
@@ -15,7 +16,6 @@ use std::{
     num::NonZero,
     ops::Range,
     path::{Path, PathBuf},
-    sync::Mutex,
 };
 
 // Wrapper to make the FFmpeg child process quit gracefully on drop
@@ -41,7 +41,7 @@ struct Decoder {
     fps: f32,
     width: NonZero<u16>,
     height: NonZero<u16>,
-    iter: Mutex<Box<dyn Iterator<Item = OutputVideoFrame> + Send>>,
+    iter: SyncCell<Box<dyn Iterator<Item = OutputVideoFrame> + Send>>,
     _ffmpeg: FFmpegWrapper, // The field order here (determines drop order) seems to be important for the FFmpeg child process to quit properly
 }
 
@@ -84,7 +84,7 @@ impl Decoder {
             Some((
                 Self {
                     _ffmpeg: FFmpegWrapper(ffmpeg),
-                    iter: Mutex::new(Box::new(frame_iter)),
+                    iter: SyncCell::new(Box::new(frame_iter)),
                     frame: (seek * video_stream.fps) as u32,
                     fps: video_stream.fps,
                     width: NonZero::new(video_stream.width as u16)?,
@@ -98,10 +98,10 @@ impl Decoder {
     }
 }
 
-#[derive(Default, Resource)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd, Resource)]
 pub struct Playhead(pub f32);
 
-#[derive(Resource)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Resource)]
 pub struct Resolution(pub U16Vec2);
 
 #[derive(Component)]
@@ -201,7 +201,7 @@ pub fn sys_active_videos(
                         let step = (diff - 1) as usize;
 
                         let new_frame = {
-                            let mut iter = decoder.iter.lock().unwrap();
+                            let iter = decoder.iter.get();
 
                             if single_frame {
                                 iter.next()

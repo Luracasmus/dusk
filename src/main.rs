@@ -13,7 +13,7 @@ use video::*;
 mod file;
 mod video;
 
-#[derive(Clone, Default, Eq, PartialEq, Hash, Debug, States)]
+#[derive(Clone, Copy, Default, Eq, PartialEq, Hash, Debug, States)]
 enum PlayerState {
     #[default]
     Paused,
